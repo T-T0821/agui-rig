@@ -54,7 +54,7 @@ flowchart LR
   subgraph PC["利用者の PC"]
     App["Tauri アプリ (Rust)<br/>トークンと一時認証情報はメモリだけ"]
   end
-  IdP["共通基盤 OAuth (OIDC)<br/>Auth0 など"]
+  IdP["共通基盤 OAuth (OIDC)<br/>Auth0"]
   subgraph AWS["AWS アカウント"]
     STS["STS<br/>AssumeRoleWithWebIdentity"]
     IAM["IAM<br/>OIDC プロバイダー + ロール"]
@@ -103,6 +103,27 @@ flowchart LR
   このため、アプリのロールに DynamoDB の権限は要りません。
 - トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
 
+## 共通基盤 (Auth0) の設定
+
+共通基盤は Auth0 です。Auth0 側とこのアプリ側で、次のように合わせます。
+
+| 場所 | 設定 |
+| --- | --- |
+| Auth0 の Application | 種類は **Native**。Grant Types は **Authorization Code** と **Refresh Token**。Refresh Token Rotation を有効にする |
+| Auth0 の Allowed Callback URLs | `http://127.0.0.1:53682/callback` (ポートは下の `OAUTH_REDIRECT_PORT` と同じ値) |
+| アプリ | `OAUTH_ISSUER=https://<テナント>.auth0.com/` (カスタムドメインならその URL)、`OAUTH_CLIENT_ID=<Client ID>`、`OAUTH_REDIRECT_PORT=53682` |
+
+- Auth0 はコールバック URL をポートまで完全一致で確かめるので、`OAUTH_REDIRECT_PORT` の固定が**必須**です (未設定だと空いているポートを使うため、Auth0 に断られます)。
+  そのポートが PC で使われていると、ログインできません。ほかと重なりにくい番号を選んでください
+- リフレッシュトークンは `offline_access` スコープで受け取ります (既定のスコープに入っています)
+- ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 3 か所) は、どれもこの末尾の `/` まで合わせてください
+  - IAM の OIDC プロバイダー: 信頼ポリシーの条件キーも `<テナント>.auth0.com/:aud` と `/` 入りになります
+  - AppSync の `OidcIssuer` (`infra/chat-history.yaml`)
+  - Collector の `issuer_url` (`infra/otel-collector.yaml`)
+- ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
+- 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
+  DynamoDB と Langfuse にはそのまま入ります
+
 ## AWS 側の準備
 
 1. **IAM の OIDC プロバイダー**: 共通基盤の issuer URL を登録し、audience に OAuth のクライアント ID を入れる。issuer は HTTPS で公開されていて、AWS から JWKS を取得できる必要がある。
@@ -139,7 +160,7 @@ aws cloudformation deploy \
   --template-file infra/chat-history.yaml \
   --stack-name agui-rig-chat-history \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides OidcIssuer=https://auth.example.com/ OidcClientId=chat-app
+  --parameter-overrides OidcIssuer=https://your-tenant.auth0.com/ OidcClientId=your-client-id
 aws cloudformation describe-stacks --stack-name agui-rig-chat-history \
   --query "Stacks[0].Outputs[?OutputKey=='GraphQLUrl'].OutputValue" --output text
 ```
