@@ -4386,6 +4386,7 @@ dependencies = [
 name = "rig-agui-chat"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-bedrockagentcore",
@@ -4398,6 +4399,7 @@ dependencies = [
  "flate2",
  "futures",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rand 0.9.5",

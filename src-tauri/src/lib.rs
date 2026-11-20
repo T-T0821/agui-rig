@@ -194,6 +194,7 @@ async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus,
     let runtime = build_runtime(&state, Some((id_token.clone(), session.principal.clone())), Some(session.sub.clone())).await?;
     replace_runtime(&state.runtime, Some(runtime));
     *state.session.lock().unwrap() = Some(session);
+    telemetry::set_id_token(Some(id_token.clone()));
     start_refresh(&app, &state, id_token);
     Ok(status(&state))
 }
@@ -204,6 +205,7 @@ fn logout(state: State<'_, AppState>) -> AuthStatus {
         task.abort();
     }
     *state.session.lock().unwrap() = None;
+    telemetry::set_id_token(None);
     replace_runtime(&state.runtime, None);
     status(&state)
 }
@@ -226,6 +228,7 @@ fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
                 Err(e) => {
                     tracing::warn!("トークンを更新できません。再ログインが必要です: {e}");
                     *session.lock().unwrap() = None;
+                    telemetry::set_id_token(None);
                     replace_runtime(&runtime, None);
                     let _ = app.emit("auth-changed", ());
                     return;

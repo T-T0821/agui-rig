@@ -212,6 +212,22 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       return json({ data });
     }
 
+    // ---- OTel Collector (OTLP/HTTP の受け口、ID トークンで認証) ----
+    // 本物の Collector は oidc 認証拡張で署名・issuer・audience・期限を確かめる。ここでは署名以外を確かめる
+    if (url.pathname === "/v1/traces") {
+      let claims;
+      try {
+        const [scheme, token] = (req.headers.authorization ?? "").split(" ");
+        claims = scheme === "Bearer" ? JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()) : null;
+      } catch {
+        claims = null;
+      }
+      const ok = claims?.iss === base && claims?.aud === "chat-app" && claims.exp > Date.now() / 1000;
+      log("Collector: トレースを受信", `${raw.length} バイト`, ok ? `(利用者 ${claims.sub})` : "(認証エラー)");
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/x-protobuf" });
+      return res.end();
+    }
+
     // ---- Langfuse (OTLP/HTTP の受け口) ----
     if (url.pathname === "/api/public/otel/v1/traces") {
       const expected = "Basic " + Buffer.from(`${MOCK_LANGFUSE.publicKey}:${MOCK_LANGFUSE.secretKey}`).toString("base64");
