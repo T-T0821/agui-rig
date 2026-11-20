@@ -77,6 +77,7 @@ flowchart LR
   AppSync -. "JWKS で検証" .-> IdP
   AppSync -- "sub ごとに読み書き" --> DDB
   AppSync -- "利用料金 (sub)" --> Usage["Lambda (VPC)"]
+  Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
   App -- "⑥ OTLP/HTTP" --> Collector
   Collector --> Langfuse
