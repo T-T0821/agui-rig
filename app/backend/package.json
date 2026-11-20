@@ -1,6 +1,7 @@
 {
   "name": "agui-rig-backend",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "API Gateway (HTTP API + JWT オーソライザー) から呼ばれる Lambda: チャット履歴と利用料金",
   "scripts": {

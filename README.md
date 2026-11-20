@@ -433,3 +433,13 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 
 - CopilotKit の表示では、`selfManagedAgents` は Enterprise tier の機能とされています。キーなしでも動作しますが、配布前にライセンス条件を確認してください。
 - 過去のターンのツール呼び出しと結果は、次のターンではテキストとしてモデルに渡しています (プロバイダーのツール ID の整合を気にしなくて済むように)。
+
+## ライセンス
+
+[MIT License](LICENSE) です。
+
+- 依存パッケージ (npm / Cargo) は MIT、Apache-2.0、BSD、ISC などの寛容なライセンスがほとんどです。
+  一部の Rust クレート (`cssparser`、`selectors` など。Tauri の WebView 周りが使う) は MPL-2.0 ですが、
+  変更せずに使う限り、このリポジトリのコードを MIT のまま配布できます
+- 配布物には、依存パッケージのライセンス表記も同梱してください (例: `cargo about` や `npx license-checker` で一覧を作る)
+- CopilotKit の `selfManagedAgents` の扱いは、上の「補足」を参照してください
