@@ -3,6 +3,7 @@ mod agui;
 mod auth;
 mod aws;
 mod config;
+mod history;
 mod server;
 mod telemetry;
 mod tools;
@@ -27,6 +28,7 @@ use server::SharedRuntime;
 use tools::Tools;
 use tools::code_interpreter::CodeInterpreter;
 use tools::mcp::McpHub;
+use history::{History, ThreadSummary};
 
 /// 既定のモデル (推論プロファイル ID)。`BEDROCK_MODEL_ID` で上書きできる。
 const DEFAULT_MODEL: &str = "global.anthropic.claude-sonnet-5-5";
@@ -78,6 +80,12 @@ fn status(state: &AppState) -> AuthStatus {
 /// 認証情報からモデルとツールを組み立てる。
 async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Result<Arc<Runtime>, String> {
     let user = token.as_ref().map(|(_, principal)| principal.clone());
+    // チャット履歴 (AppSync)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
+    let history = std::env::var("CHAT_API_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .zip(token.as_ref().map(|(t, _)| t.clone()))
+        .map(|(url, token)| Arc::new(History::new(url, token)));
     let config = aws::sdk_config(&state.aws, token).await?;
 
     // 動作確認用: LLM_MODEL (vendor/model 形式、例: anthropic/claude-sonnet-5-5) があれば
@@ -102,7 +110,7 @@ async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Re
         .then(|| Arc::new(CodeInterpreter::new(aws_sdk_bedrockagentcore::Client::new(&config), ci_id)));
 
     let mcp = state.mcp.get_or_init(|| async { Arc::new(McpHub::empty()) }).await.clone();
-    Ok(Arc::new(Runtime { model: Arc::new(model), tools: Tools { code_interpreter, mcp }, user }))
+    Ok(Arc::new(Runtime { model: Arc::new(model), tools: Tools { code_interpreter, mcp }, user, history }))
 }
 
 /// 実行環境を差し替える。古い Code Interpreter のセッションは止める。
@@ -111,6 +119,37 @@ fn replace_runtime(runtime: &SharedRuntime, next: Option<Arc<Runtime>>) {
     if let Some(ci) = old.and_then(|r| r.tools.code_interpreter.clone()) {
         tauri::async_runtime::spawn(async move { ci.stop_all().await });
     }
+}
+
+fn history_of(state: &AppState) -> Option<Arc<History>> {
+    state.runtime.read().unwrap().as_ref().and_then(|r| r.history.clone())
+}
+
+#[derive(Serialize)]
+struct ThreadList {
+    /// 履歴が使えるか (CHAT_API_URL が設定されていて、ログイン済み)
+    enabled: bool,
+    threads: Vec<ThreadSummary>,
+}
+
+/// 自分の過去の会話の一覧。
+#[tauri::command]
+async fn list_threads(state: State<'_, AppState>) -> Result<ThreadList, String> {
+    match history_of(&state) {
+        Some(h) => Ok(ThreadList { enabled: true, threads: h.list().await? }),
+        None => Ok(ThreadList { enabled: false, threads: vec![] }),
+    }
+}
+
+/// 会話のメッセージ (AG-UI の形) を読み込む。
+#[tauri::command]
+async fn load_thread(state: State<'_, AppState>, thread_id: String) -> Result<Vec<serde_json::Value>, String> {
+    history_of(&state).ok_or("チャット履歴は無効です")?.load(&thread_id).await
+}
+
+#[tauri::command]
+async fn delete_thread(state: State<'_, AppState>, thread_id: String) -> Result<(), String> {
+    history_of(&state).ok_or("チャット履歴は無効です")?.delete(&thread_id).await
 }
 
 #[tauri::command]
@@ -279,7 +318,15 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![agent_endpoint, auth_status, login, logout])
+        .invoke_handler(tauri::generate_handler![
+            agent_endpoint,
+            auth_status,
+            login,
+            logout,
+            list_threads,
+            load_thread,
+            delete_thread
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {

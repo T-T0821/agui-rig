@@ -4395,6 +4395,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "dotenvy",
+ "flate2",
  "futures",
  "opentelemetry",
  "opentelemetry-otlp",

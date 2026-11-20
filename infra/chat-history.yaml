@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  agui-rig のチャット履歴: AppSync (OpenID Connect 認証) + DynamoDB。
+  アプリは共通基盤の ID トークンで AppSync を呼び、リゾルバーがトークンの sub で利用者ごとに分ける。
+
+Parameters:
+  OidcIssuer:
+    Type: String
+    Description: 共通基盤の issuer (例 https://auth.example.com)。ID トークンの iss と完全に一致させる
+  OidcClientId:
+    Type: String
+    Description: アプリの OAuth クライアント ID (ID トークンの aud)
+  TableName:
+    Type: String
+    Default: agui-rig-chat-history
+
+Resources:
+  # pk = 利用者の sub、sk = 会話 ID。会話 1 件 = 1 項目 (メッセージは gzip + base64 で 1 属性に)
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      SSESpecification: { SSEEnabled: true }
+
+  Api:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: agui-rig-chat-history
+      AuthenticationType: OPENID_CONNECT
+      OpenIDConnectConfig:
+        Issuer: !Ref OidcIssuer
+        ClientId: !Ref OidcClientId
+        AuthTTL: 3600000
+        IatTTL: 3600000
+
+  Schema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      Definition: |
+        type Thread {
+          id: ID!
+          title: String!
+          updatedAt: AWSDateTime!
+          "メッセージ (AG-UI の形の JSON 配列) を gzip して base64 にしたもの"
+          messagesGz: String
+        }
+
+        type Query {
+          "自分の会話の一覧 (メッセージは含まない)"
+          threads: [Thread!]!
+          "自分の会話 1 件"
+          thread(id: ID!): Thread
+        }
+
+        type Mutation {
+          saveThread(id: ID!, title: String!, messagesGz: String!): Thread!
+          deleteThread(id: ID!): Boolean!
+        }
+
+  DataSourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: appsync.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: chat-history-table
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: !GetAtt Table.Arn
+
+  DataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      Name: ChatHistoryTable
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DataSourceRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref Table
+        AwsRegion: !Ref AWS::Region
+
+  # リゾルバーはすべて ctx.identity.sub (AppSync が検証した ID トークンの sub) だけを pk に使う。
+  # 引数で利用者を指定する方法は無いので、他人の会話には届かない。
+  ThreadsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      TypeName: Query
+      FieldName: threads
+      DataSourceName: !GetAtt DataSource.Name
+      Runtime: { Name: APPSYNC_JS, RuntimeVersion: 1.0.0 }
+      Code: |
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          return {
+            operation: "Query",
+            query: { expression: "pk = :pk", expressionValues: { ":pk": { S: ctx.identity.sub } } },
+            projection: { expression: "sk, title, updatedAt" },
+            scanIndexForward: false,
+            limit: 200,
+          };
+        }
+        export function response(ctx) {
+          if (ctx.error) util.error(ctx.error.message, ctx.error.type);
+          // 並べ替え (新しい順) はアプリ側で行う
+          return ctx.result.items.map((i) => ({ id: i.sk, title: i.title, updatedAt: i.updatedAt }));
+        }
+
+  ThreadResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      TypeName: Query
+      FieldName: thread
+      DataSourceName: !GetAtt DataSource.Name
+      Runtime: { Name: APPSYNC_JS, RuntimeVersion: 1.0.0 }
+      Code: |
+        import { util } from "@aws-appsync/utils";
+        import * as ddb from "@aws-appsync/utils/dynamodb";
+        export function request(ctx) {
+          return ddb.get({ key: { pk: ctx.identity.sub, sk: ctx.args.id } });
+        }
+        export function response(ctx) {
+          if (ctx.error) util.error(ctx.error.message, ctx.error.type);
+          const i = ctx.result;
+          return i ? { id: i.sk, title: i.title, updatedAt: i.updatedAt, messagesGz: i.messagesGz } : null;
+        }
+
+  SaveThreadResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      TypeName: Mutation
+      FieldName: saveThread
+      DataSourceName: !GetAtt DataSource.Name
+      Runtime: { Name: APPSYNC_JS, RuntimeVersion: 1.0.0 }
+      Code: |
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          const now = util.time.nowISO8601();
+          return {
+            operation: "UpdateItem",
+            key: util.dynamodb.toMapValues({ pk: ctx.identity.sub, sk: ctx.args.id }),
+            update: {
+              expression: "SET title = :title, messagesGz = :m, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)",
+              expressionValues: util.dynamodb.toMapValues({ ":title": ctx.args.title, ":m": ctx.args.messagesGz, ":now": now }),
+            },
+          };
+        }
+        export function response(ctx) {
+          if (ctx.error) util.error(ctx.error.message, ctx.error.type);
+          const i = ctx.result;
+          return { id: i.sk, title: i.title, updatedAt: i.updatedAt };
+        }
+
+  DeleteThreadResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      TypeName: Mutation
+      FieldName: deleteThread
+      DataSourceName: !GetAtt DataSource.Name
+      Runtime: { Name: APPSYNC_JS, RuntimeVersion: 1.0.0 }
+      Code: |
+        import { util } from "@aws-appsync/utils";
+        import * as ddb from "@aws-appsync/utils/dynamodb";
+        export function request(ctx) {
+          return ddb.remove({ key: { pk: ctx.identity.sub, sk: ctx.args.id } });
+        }
+        export function response(ctx) {
+          if (ctx.error) util.error(ctx.error.message, ctx.error.type);
+          return true;
+        }
+
+Outputs:
+  GraphQLUrl:
+    Description: アプリの CHAT_API_URL に設定する
+    Value: !GetAtt Api.GraphQLUrl
+  TableName:
+    Value: !Ref Table

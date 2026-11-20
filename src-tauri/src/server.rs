@@ -42,7 +42,7 @@ pub fn router(state: ServerState) -> Router {
 async fn run_agent(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Json(input): Json<RunAgentInput>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Response {
     let authorized = headers
         .get(header::AUTHORIZATION)
@@ -50,6 +50,15 @@ async fn run_agent(
         .is_some_and(|v| v == format!("Bearer {}", state.token));
     if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut input: RunAgentInput = match serde_json::from_value(raw.clone()) {
+        Ok(input) => input,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+    };
+    // 履歴にはフロントから来たメッセージをそのまま保存する
+    if let Some(serde_json::Value::Array(messages)) = raw.get("messages") {
+        input.raw_messages = messages.clone();
     }
 
     let runtime = state.runtime.read().unwrap().clone();
