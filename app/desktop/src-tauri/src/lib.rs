@@ -38,7 +38,7 @@ const DEFAULT_CODE_INTERPRETER: &str = "aws.codeinterpreter.v1";
 struct AppState {
     endpoint: AgentEndpoint,
     aws: AwsSettings,
-    /// 共通基盤の OAuth。開発モードと設定エラーのときは None
+    /// Auth0。開発モードと設定エラーのときは None
     oauth: Option<Arc<OAuthClient>>,
     /// ログインなしで、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) を使う開発モード。開発ビルドだけ
     dev_mode: bool,
@@ -84,7 +84,7 @@ async fn build_runtime(
     token: Option<(IdToken, String)>,
     user_id: Option<String>,
 ) -> Result<Arc<Runtime>, String> {
-    // チャット履歴 (AppSync)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
+    // チャット履歴 (API Gateway)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
     let history = std::env::var("CHAT_API_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())
@@ -175,7 +175,7 @@ fn auth_status(state: State<'_, AppState>) -> AuthStatus {
     status(&state)
 }
 
-/// 共通基盤の OAuth でログインし、ID トークン → STS の一時認証情報で Bedrock などを使えるようにする。
+/// Auth0 でログインし、ID トークン → STS の一時認証情報で Bedrock などを使えるようにする。
 #[tauri::command]
 async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus, String> {
     let oauth = state

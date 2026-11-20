@@ -1,4 +1,4 @@
-//! 共通基盤の OAuth (OpenID Connect) でのログイン。
+//! Auth0 (OpenID Connect) でのログイン。
 //!
 //! デスクトップアプリ向けの標準的な方式 (RFC 8252) で行う:
 //! Authorization Code + PKCE、OS の既定ブラウザでログインし、

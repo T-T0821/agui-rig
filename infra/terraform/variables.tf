@@ -10,7 +10,7 @@ variable "name" {
   default     = "agui-rig"
 }
 
-# ---- 共通基盤 (Auth0) ----
+# ---- Auth0 ----
 
 variable "oidc_issuer" {
   description = "Auth0 の issuer (例 https://your-tenant.auth0.com/)。ID トークンの iss と末尾の / まで完全に一致させる"
@@ -85,4 +85,18 @@ variable "utc_offset_minutes" {
   description = "「今日」「今月」の区切りに使うタイムゾーン (分)。日本は 540"
   type        = number
   default     = 540
+}
+
+# ---- API Gateway ----
+
+variable "api_throttle_rate" {
+  description = "API Gateway の 1 秒あたりのリクエスト数の上限 (全利用者の合計)"
+  type        = number
+  default     = 50
+}
+
+variable "api_throttle_burst" {
+  description = "API Gateway の同時リクエスト数の上限"
+  type        = number
+  default     = 100
 }

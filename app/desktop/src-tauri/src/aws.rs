@@ -1,6 +1,6 @@
 //! AWS の認証情報とクライアント。
 //!
-//! 共通基盤の ID トークンを STS AssumeRoleWithWebIdentity で一時 IAM 認証情報に
+//! Auth0 の ID トークンを STS AssumeRoleWithWebIdentity で一時 IAM 認証情報に
 //! 交換して使う。長期のアクセスキーはどこにも置かない。
 //! OAuth を設定していない場合 (開発用) は、AWS SDK 標準の探索順 (環境変数、
 //! ~/.aws の profile / SSO など) で認証する。

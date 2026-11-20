@@ -1,13 +1,11 @@
-// AppSync から { sub } だけを受け取り、その利用者の料金だけを返す。
+// 利用料金: API Gateway (JWT オーソライザー) → この Lambda (VPC 内) → Langfuse の集計 API
+//   GET /usage  呼び出した利用者 (sub) の今日と今月の料金
 // Langfuse のキーはこの Lambda だけが持つ (アプリには渡さない)。
 // @aws-sdk/* は Lambda の Node.js ランタイムに入っているので、まとめずに外から読む。
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import type { AppSyncResolverHandler } from "aws-lambda";
+import { type Event, type Result, error, json, subOf } from "./http.ts";
 
-/** AppSync のリゾルバーが渡すもの (検証済みの ID トークンの sub だけ) */
-type UsageArgs = { sub?: string };
-
-/** GraphQL の Usage 型 */
+/** 応答 */
 type Usage = { todayUsd: number; monthUsd: number; monthStart: string };
 
 /** Langfuse の /api/public/metrics/daily の応答 (使う所だけ) */
@@ -69,12 +67,12 @@ export function periodStarts(now: Date, offsetMinutes: number): { todayStart: Da
   };
 }
 
-export const handler: AppSyncResolverHandler<UsageArgs, Usage> = async (event) => {
-  // リゾルバーは payload を { sub } にして Invoke するので、event そのものが引数になる
-  const sub = (event as unknown as UsageArgs).sub;
-  if (!sub) throw new Error("Unauthorized");
+export async function handler(event: Event): Promise<Result> {
+  const sub = subOf(event);
+  if (!sub) return error(401, "Unauthorized");
   const now = new Date();
   const { todayStart, monthStart } = periodStarts(now, Number(process.env.UTC_OFFSET_MINUTES ?? 0));
   const [todayUsd, monthUsd] = await Promise.all([costBetween(sub, todayStart, now), costBetween(sub, monthStart, now)]);
-  return { todayUsd, monthUsd, monthStart: monthStart.toISOString() };
-};
+  const usage: Usage = { todayUsd, monthUsd, monthStart: monthStart.toISOString() };
+  return json(200, usage);
+}

@@ -70,7 +70,7 @@ export default function App() {
   const [history, setHistory] = useState<ThreadList>({ enabled: false, threads: [] });
   const [usage, setUsage] = useState<Usage | null>(null);
 
-  // 利用料金 (AppSync → Lambda → Langfuse)。Langfuse の集計は少し遅れるので、定期的にも読み直す
+  // 利用料金 (API Gateway → Lambda → Langfuse)。Langfuse の集計は少し遅れるので、定期的にも読み直す
   const refreshUsage = useCallback(() => {
     invoke<Usage | null>("usage_summary").then(setUsage, (e) => console.warn("利用料金を読めません", e));
   }, []);
@@ -81,7 +81,7 @@ export default function App() {
     return () => clearInterval(timer);
   }, [auth, refreshUsage]);
 
-  // チャット履歴 (AppSync)。Rust 側が ID トークンで読み書きする
+  // チャット履歴 (API Gateway → Lambda → DynamoDB)。Rust 側が ID トークンで読み書きする
   const refreshHistory = useCallback(() => {
     invoke<ThreadList>("list_threads").then(setHistory, (e) => console.warn("履歴を読めません", e));
   }, []);
@@ -182,7 +182,7 @@ export default function App() {
               <MessagesSquare className="size-5" />
             </div>
             <CardTitle className="text-xl">Rig Chat</CardTitle>
-            <CardDescription>共通基盤のアカウントでログインしてください。</CardDescription>
+            <CardDescription>Auth0 のアカウントでログインしてください。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <Button size="lg" className="w-full" disabled={busy} onClick={() => run("login")}>
