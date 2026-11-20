@@ -150,11 +150,13 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 | IAM ロール (アプリ用) | 信頼: Auth0 の ID トークンだけ (`<テナント>.auth0.com/:aud` = Client ID)。権限: Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB の権限は持たない |
 | DynamoDB テーブル | チャット履歴 (`pk` = 利用者の `sub`、`sk` = 会話 ID) |
 | AppSync (GraphQL) | OpenID Connect 認証 (Auth0 の ID トークン)。スキーマは `schema.graphql`、リゾルバーは `resolvers/*.js` |
-| 利用料金の Lambda (任意) | `langfuse_secret_arn` を指定したときだけ作る。コードは `lambda/usage/index.js` |
+| 利用料金の Lambda (任意) | `langfuse_secret_arn` を指定したときだけ作る。コードは TypeScript (`lambda/usage/src/index.ts`) で、esbuild で 1 つの JS にまとめる |
 
 ```sh
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id などを入れる
+# 利用料金の Lambda を作るとき (langfuse_secret_arn を指定するとき) だけ、先にビルドする
+npm --prefix lambda/usage ci && npm --prefix lambda/usage run build
 terraform init
 terraform plan
 terraform apply

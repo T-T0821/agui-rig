@@ -1,0 +1,17 @@
+{
+  "name": "agui-rig-usage-lambda",
+  "private": true,
+  "type": "module",
+  "description": "AppSync から呼ばれ、Langfuse から利用者 (sub) の今日と今月の料金を返す Lambda",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.mjs --external:@aws-sdk/*"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1173.0",
+    "@types/aws-lambda": "^8.10.164",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

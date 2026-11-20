@@ -27,3 +27,23 @@ jobs:
         run: |
           terraform init -backend=false -input=false
           terraform validate
+
+  usage-lambda:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform/lambda/usage
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/terraform/lambda/usage/package-lock.json
+
+      - name: Type check and build
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
