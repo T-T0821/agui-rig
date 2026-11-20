@@ -182,7 +182,7 @@ export default function App() {
               <MessagesSquare className="size-5" />
             </div>
             <CardTitle className="text-xl">Rig Chat</CardTitle>
-            <CardDescription>共通基盤のアカウントでログインしてください。</CardDescription>
+            <CardDescription>Auth0 のアカウントでログインしてください。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <Button size="lg" className="w-full" disabled={busy} onClick={() => run("login")}>

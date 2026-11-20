@@ -2,7 +2,7 @@
 #
 #   アプリ ─(OTLP/HTTP + Authorization: Bearer <ID トークン>)→ この Collector ─(Langfuse のキー)→ Langfuse
 #
-# - アプリからの受信は、共通基盤の ID トークンで認証する (oidc 認証拡張が署名・issuer・audience・期限を確かめる)。
+# - アプリからの受信は、Auth0 の ID トークンで認証する (oidc 認証拡張が署名・issuer・audience・期限を確かめる)。
 #   アプリ側は TELEMETRY_AUTH=id_token と OTEL_EXPORTER_OTLP_ENDPOINT=https://<この Collector> を設定する
 # - 利用者 ID (langfuse.user.id) は、アプリが送った値ではなく、検証したトークンの sub で上書きする。
 #   そのため、ほかの人の名前で料金を付けることはできない

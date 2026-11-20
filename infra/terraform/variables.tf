@@ -10,7 +10,7 @@ variable "name" {
   default     = "agui-rig"
 }
 
-# ---- 共通基盤 (Auth0) ----
+# ---- Auth0 ----
 
 variable "oidc_issuer" {
   description = "Auth0 の issuer (例 https://your-tenant.auth0.com/)。ID トークンの iss と末尾の / まで完全に一致させる"

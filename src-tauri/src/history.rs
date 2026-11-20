@@ -1,6 +1,6 @@
 //! チャット履歴 (AppSync → DynamoDB)。
 //!
-//! AppSync の GraphQL API を、共通基盤の ID トークン (OpenID Connect 認証) で呼ぶ。
+//! AppSync の GraphQL API を、Auth0 の ID トークン (OpenID Connect 認証) で呼ぶ。
 //! AppSync がトークンを検証し、リゾルバーがトークンの `sub` だけをパーティションキーに使うので、
 //! 利用者は自分の会話にしか届かない。AWS の一時認証情報は使わない。
 //! API とテーブルは `infra/chat-history.yaml` (CloudFormation) で作る。
