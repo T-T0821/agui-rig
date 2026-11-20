@@ -1,0 +1,29 @@
+type Thread {
+  id: ID!
+  title: String!
+  updatedAt: AWSDateTime!
+  "メッセージ (AG-UI の形の JSON 配列) を gzip して base64 にしたもの"
+  messagesGz: String
+}
+
+"利用料金 (Langfuse が計算したもの。USD)"
+type Usage {
+  todayUsd: Float!
+  monthUsd: Float!
+  "集計の始まり (今月 1 日 0 時)"
+  monthStart: AWSDateTime!
+}
+
+type Query {
+  "自分の会話の一覧 (メッセージは含まない)"
+  threads: [Thread!]!
+  "自分の会話 1 件"
+  thread(id: ID!): Thread
+  "自分の利用料金 (利用料金の機能を作っていなければ null)"
+  usage: Usage
+}
+
+type Mutation {
+  saveThread(id: ID!, title: String!, messagesGz: String!): Thread!
+  deleteThread(id: ID!): Boolean!
+}
