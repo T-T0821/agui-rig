@@ -1,6 +1,7 @@
 {
   "name": "agui-rig-usage-lambda",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "AppSync から呼ばれ、Langfuse から利用者 (sub) の今日と今月の料金を返す Lambda",
   "scripts": {
