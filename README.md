@@ -72,6 +72,42 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 
 必要なもの: Node.js 20 以上、Rust 1.97.1 以上、[Tauri の前提パッケージ](https://v2.tauri.app/start/prerequisites/) (Windows は WebView2 と MSVC ビルドツール)。
 
+### まず試す (全部模擬)
+
+```sh
+npm install
+npm run dev:mock
+```
+
+`dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、共通基盤 OAuth、AWS STS、Bedrock、
+AgentCore Code Interpreter、Langfuse をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
+
+- 「ログイン」を押すとブラウザが開き、すぐに「模擬 太郎」でログインした状態になります
+- 何か送ると、模擬の Bedrock が決まった筋書きで MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
+  (画面やツール表示の開発向け。回答の中身は意味のあるものではありません)
+- 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
+- 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Langfuse へのトレース送信など) はターミナルに `[mock]` で出ます
+- 例の MCP サーバー (`examples/time-mcp`) の依存は、初回に自動でインストールします
+
+### ログインを省略して本物の AWS で試す
+
+```sh
+aws sso login --profile my-dev      # など、ローカルの AWS 認証を用意する
+AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run dev:aws
+```
+
+共通基盤の OAuth を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
+AgentCore Code Interpreter を呼びます。そのプロファイルには、下の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
+`.env` に `AWS_PROFILE` などを書いておいても使われます。
+
+`dev:mock` も `dev:aws` も開発ビルド専用です。リリースビルドでは、
+
+- ログインの省略 (`DEV_SKIP_LOGIN`、`OAUTH_ISSUER` 未設定) はできず、ログイン画面に設定エラーを出します
+- `OAUTH_ISSUER` は `https://` 必須なので、模擬サーバー (`http://127.0.0.1`) には向けられません
+- `LLM_MODEL` (Anthropic API 直結) は無視し、必ず Bedrock を使います
+
+### 本物の環境で動かす
+
 ```sh
 npm install
 cp .env.example .env            # OAuth / AWS / モデルの設定
@@ -84,7 +120,8 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 
 | 変数 | 内容 |
 | --- | --- |
-| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | 共通基盤の OIDC。未設定ならログインなしの開発モード (AWS は `AWS_PROFILE` や SSO など SDK 標準の認証) |
+| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | 共通基盤の OIDC。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
+| `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`npm run dev:aws` が設定する) |
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
@@ -159,8 +196,9 @@ ANTHROPIC_API_KEY=...
 
 このとき OAuth を設定していなければ、Code Interpreter は無効になります (AWS の認証が無いため)。AWS の認証があるなら `CODE_INTERPRETER_ID=aws.codeinterpreter.v1` で有効にできます。
 
-### 疑似サーバーでの確認
+### 模擬サーバーと AWS のエンドポイント
 
+`npm run dev:mock` の模擬サーバーは単体でも起動できます (`npm run mock-server`)。
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
 
 ## 配布するとき (設定の渡し方)
@@ -223,6 +261,8 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
 | `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
+| `dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / Langfuse) |
+| `dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
 
 ## 補足
 

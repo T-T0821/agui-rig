@@ -30,7 +30,7 @@ pub struct OAuthConfig {
 impl OAuthConfig {
     /// OAUTH_ISSUER が無ければ None (ログインなしの開発モード)。
     pub fn from_env() -> Option<Self> {
-        let issuer = std::env::var("OAUTH_ISSUER").ok()?;
+        let issuer = std::env::var("OAUTH_ISSUER").ok().filter(|s| !s.trim().is_empty())?;
         Some(Self {
             issuer: issuer.trim_end_matches('/').to_string(),
             client_id: std::env::var("OAUTH_CLIENT_ID").unwrap_or_default(),

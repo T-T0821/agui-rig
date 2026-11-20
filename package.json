@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dev:mock": "node dev/run.mjs mock",
+    "dev:aws": "node dev/run.mjs aws",
+    "mock-server": "node dev/mock-server.mjs"
   },
   "dependencies": {
     "@ag-ui/client": "1.0.5",
@@ -17,6 +20,8 @@
     "rxjs": "^7.8.1"
   },
   "devDependencies": {
+    "@smithy/eventstream-codec": "^4.5.2",
+    "@smithy/util-utf8": "^4.5.2",
     "@tauri-apps/cli": "^2.12.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
