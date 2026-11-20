@@ -12,6 +12,7 @@
 //! 3. どちらも無ければ送らない
 //!
 //! プロンプトや回答の本文は、`TELEMETRY_RECORD_CONTENT=true` のときだけ記録する。
+//! 利用者 ID (ID トークンの sub) は、利用料金の集計に使うので常に記録する。
 
 use std::collections::HashMap;
 use std::io::IsTerminal;

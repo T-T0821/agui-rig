@@ -29,8 +29,9 @@ const MAX_STEPS: usize = 10;
 pub struct Runtime {
     pub model: Arc<DynModel<Completion>>,
     pub tools: Tools,
-    /// トレースに載せる利用者 (STS のセッション名と同じ、メールなど)。開発モードでは None
-    pub user: Option<String>,
+    /// トレースに載せる利用者 ID (ID トークンの sub。メールなどではない不透明な ID)。開発モードでは None。
+    /// 利用料金を利用者ごとに集計するキーなので、本文の記録設定に関係なく常に送る
+    pub user_id: Option<String>,
     /// チャット履歴の保存先 (CHAT_API_URL 未設定、または未ログインなら None)
     pub history: Option<Arc<History>>,
 }
@@ -98,7 +99,7 @@ pub async fn run(runtime: &Runtime, input: RunAgentInput, emit: impl Fn(Event)) 
         langfuse.trace.name = "chat",
         langfuse.observation.type = "agent",
         langfuse.session.id = %input.thread_id,
-        langfuse.user.id = runtime.user.as_deref().filter(|_| content),
+        langfuse.user.id = runtime.user_id.as_deref(),
         agui.run_id = %input.run_id,
         langfuse.trace.input = Empty,
         langfuse.trace.output = Empty,

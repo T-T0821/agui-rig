@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  agui-rig のチャット履歴: AppSync (OpenID Connect 認証) + DynamoDB。
+  agui-rig のチャット履歴と利用料金: AppSync (OpenID Connect 認証) + DynamoDB + (任意) Langfuse を読む Lambda。
   アプリは共通基盤の ID トークンで AppSync を呼び、リゾルバーがトークンの sub で利用者ごとに分ける。
 
 Parameters:
@@ -13,6 +13,31 @@ Parameters:
   TableName:
     Type: String
     Default: agui-rig-chat-history
+  # ---- 利用料金 (任意)。LangfuseSecretArn を空にすると作らない ----
+  LangfuseSecretArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Langfuse のキーを入れた Secrets Manager のシークレット ARN
+      (JSON: {"publicKey": "pk-lf-...", "secretKey": "sk-lf-..."})。空なら利用料金の機能を作らない
+  LangfuseHost:
+    Type: String
+    Default: ""
+    Description: Lambda から見た Langfuse の URL (例 http://langfuse-web.langfuse.svc の前に置いた内部 ALB の URL)
+  LambdaSubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Langfuse (EKS) に届く VPC のサブネット。Secrets Manager にも届くこと (VPC エンドポイントか NAT)
+  LambdaSecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ""
+  UtcOffsetMinutes:
+    Type: Number
+    Default: 540
+    Description: 「今日」「今月」の区切りに使うタイムゾーン (分)。日本は 540
+
+Conditions:
+  UsageEnabled: !Not [!Equals [!Ref LangfuseSecretArn, ""]]
 
 Resources:
   # pk = 利用者の sub、sk = 会話 ID。会話 1 件 = 1 項目 (メッセージは gzip + base64 で 1 属性に)
@@ -54,11 +79,21 @@ Resources:
           messagesGz: String
         }
 
+        "利用料金 (Langfuse が計算したもの。USD)"
+        type Usage {
+          todayUsd: Float!
+          monthUsd: Float!
+          "集計の始まり (今月 1 日 0 時)"
+          monthStart: AWSDateTime!
+        }
+
         type Query {
           "自分の会話の一覧 (メッセージは含まない)"
           threads: [Thread!]!
           "自分の会話 1 件"
           thread(id: ID!): Thread
+          "自分の利用料金 (利用料金の機能を作っていなければ null)"
+          usage: Usage
         }
 
         type Mutation {
@@ -190,6 +225,143 @@ Resources:
         export function response(ctx) {
           if (ctx.error) util.error(ctx.error.message, ctx.error.type);
           return true;
+        }
+
+  # ---- 利用料金: AppSync → Lambda (VPC 内) → Langfuse の集計 API ----
+  UsageFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UsageEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: langfuse-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref LangfuseSecretArn
+
+  UsageFunction:
+    Type: AWS::Lambda::Function
+    Condition: UsageEnabled
+    Properties:
+      Description: Langfuse から、呼び出した利用者 (sub) の今日と今月の料金を返す
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Timeout: 15
+      MemorySize: 256
+      Role: !GetAtt UsageFunctionRole.Arn
+      VpcConfig:
+        SubnetIds: !Ref LambdaSubnetIds
+        SecurityGroupIds: !Ref LambdaSecurityGroupIds
+      Environment:
+        Variables:
+          LANGFUSE_HOST: !Ref LangfuseHost
+          LANGFUSE_SECRET_ARN: !Ref LangfuseSecretArn
+          UTC_OFFSET_MINUTES: !Ref UtcOffsetMinutes
+      Code:
+        ZipFile: |
+          // AppSync から { sub } だけを受け取り、その利用者の料金だけを返す。
+          // Langfuse のキーはこの Lambda だけが持つ (アプリには渡さない)。
+          const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+          const secrets = new SecretsManagerClient({});
+          let authHeader;
+
+          async function auth() {
+            if (!authHeader) {
+              const s = await secrets.send(new GetSecretValueCommand({ SecretId: process.env.LANGFUSE_SECRET_ARN }));
+              const { publicKey, secretKey } = JSON.parse(s.SecretString);
+              authHeader = "Basic " + Buffer.from(`${publicKey}:${secretKey}`).toString("base64");
+            }
+            return authHeader;
+          }
+
+          // 期間内の料金の合計 (Langfuse の日次集計 API。ページをたどる)
+          async function costBetween(sub, from, to) {
+            let total = 0;
+            for (let page = 1; page <= 20; page++) {
+              const url = new URL("/api/public/metrics/daily", process.env.LANGFUSE_HOST);
+              url.search = new URLSearchParams({
+                userId: sub, fromTimestamp: from.toISOString(), toTimestamp: to.toISOString(), page: String(page), limit: "100",
+              });
+              const res = await fetch(url, { headers: { Authorization: await auth() } });
+              if (!res.ok) throw new Error(`Langfuse: ${res.status}`);
+              const body = await res.json();
+              total += (body.data ?? []).reduce((sum, d) => sum + (d.totalCost ?? 0), 0);
+              if (page >= (body.meta?.totalPages ?? 1)) break;
+            }
+            return total;
+          }
+
+          exports.handler = async (event) => {
+            const sub = event.sub;
+            if (!sub) throw new Error("Unauthorized");
+            const offset = Number(process.env.UTC_OFFSET_MINUTES ?? 0) * 60_000;
+            const now = new Date();
+            const local = new Date(now.getTime() + offset);
+            const todayStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - offset);
+            const monthStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1) - offset);
+            const [todayUsd, monthUsd] = await Promise.all([costBetween(sub, todayStart, now), costBetween(sub, monthStart, now)]);
+            return { todayUsd, monthUsd, monthStart: monthStart.toISOString() };
+          };
+
+  UsageDataSourceRole:
+    Type: AWS::IAM::Role
+    Condition: UsageEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: appsync.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-usage-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt UsageFunction.Arn
+
+  UsageDataSource:
+    Type: AWS::AppSync::DataSource
+    Condition: UsageEnabled
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      Name: LangfuseUsage
+      Type: AWS_LAMBDA
+      ServiceRoleArn: !GetAtt UsageDataSourceRole.Arn
+      LambdaConfig:
+        LambdaFunctionArn: !GetAtt UsageFunction.Arn
+
+  UsageResolver:
+    Type: AWS::AppSync::Resolver
+    Condition: UsageEnabled
+    DependsOn: Schema
+    Properties:
+      ApiId: !GetAtt Api.ApiId
+      TypeName: Query
+      FieldName: usage
+      DataSourceName: !GetAtt UsageDataSource.Name
+      Runtime: { Name: APPSYNC_JS, RuntimeVersion: 1.0.0 }
+      # Lambda には検証済みの sub だけを渡す
+      Code: |
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          return { operation: "Invoke", payload: { sub: ctx.identity.sub } };
+        }
+        export function response(ctx) {
+          if (ctx.error) util.error(ctx.error.message, ctx.error.type);
+          return ctx.result;
         }
 
 Outputs:
