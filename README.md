@@ -6,6 +6,7 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 - **認証**: 共通基盤の OAuth (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
 - **ツール**: Amazon Bedrock AgentCore Code Interpreter と、PC 上で起動する stdio MCP サーバー
 - **チャット履歴**: AWS AppSync (OpenID Connect 認証) 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
+- **画面**: shadcn/ui (Tailwind CSS v4) と CopilotKit v2 のチャット。OS の設定に合わせてライト / ダークを切り替える
 - **画面との接続**: AG-UI プロトコル。フロントは `@ag-ui/client` の `HttpAgent` で Rust の AG-UI エンドポイントに直接つなぐ (CopilotKit の Node ランタイムは使わない)
 
 ## 構成
@@ -403,8 +404,9 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 
 | パス | 内容 |
 | --- | --- |
-| `src/App.tsx` | ログイン画面、CopilotKit (v2) と HttpAgent |
+| `src/App.tsx` | ログイン画面、ヘッダー、会話一覧、CopilotKit (v2) と HttpAgent |
 | `src/ToolCallCard.tsx` | ツール呼び出しのカード表示 |
+| `src/components/ui/` / `src/index.css` / `components.json` | shadcn/ui の部品とテーマ。部品は `npx shadcn@latest add <名前>` で足せる |
 | `src-tauri/src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
 | `src-tauri/src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
 | `src-tauri/src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |

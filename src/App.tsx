@@ -5,6 +5,26 @@ import { CopilotChat, CopilotKitProvider } from "@copilotkit/react-core/v2";
 import "@copilotkit/react-core/v2/styles.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  CircleUser,
+  Loader2,
+  LogIn,
+  LogOut,
+  MessageSquare,
+  MessagesSquare,
+  Plus,
+  Trash2,
+  Wallet,
+  X,
+} from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 import { toolCallRenderers } from "./ToolCallCard";
 
 type AgentEndpoint = { url: string; token: string };
@@ -139,18 +159,39 @@ export default function App() {
   }, [endpoint, conversation, refreshHistory, refreshUsage]);
 
   if (!auth || !agents) {
-    return <Center>{error ? `エラー: ${error}` : "起動中…"}</Center>;
+    return (
+      <Center>
+        {error ? (
+          <p className="text-destructive text-sm">エラー: {error}</p>
+        ) : (
+          <p className="text-muted-foreground flex items-center gap-2 text-sm">
+            <Loader2 className="size-4 animate-spin" />
+            起動中…
+          </p>
+        )}
+      </Center>
+    );
   }
 
   if (auth.authRequired && !auth.loggedIn) {
     return (
       <Center>
-        <h2 style={{ margin: 0 }}>Rig Chat</h2>
-        <p>共通基盤のアカウントでログインしてください。</p>
-        <button style={buttonStyle} disabled={busy} onClick={() => run("login")}>
-          {busy ? "ブラウザでログインしてください…" : "ログイン"}
-        </button>
-        {error && <p style={{ color: "#c00" }}>{error}</p>}
+        <Card className="w-full max-w-sm">
+          <CardHeader className="justify-items-center text-center">
+            <div className="bg-primary text-primary-foreground mb-2 flex size-11 items-center justify-center rounded-xl">
+              <MessagesSquare className="size-5" />
+            </div>
+            <CardTitle className="text-xl">Rig Chat</CardTitle>
+            <CardDescription>共通基盤のアカウントでログインしてください。</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <Button size="lg" className="w-full" disabled={busy} onClick={() => run("login")}>
+              {busy ? <Loader2 className="animate-spin" /> : <LogIn />}
+              {busy ? "ブラウザでログインしてください…" : "ログイン"}
+            </Button>
+            {error && <p className="text-destructive text-center text-sm">{error}</p>}
+          </CardContent>
+        </Card>
       </Center>
     );
   }
@@ -162,133 +203,112 @@ export default function App() {
       renderToolCalls={toolCallRenderers}
       enableInspector={false}
     >
-      <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-        {auth.authRequired && (
-          <header style={headerStyle}>
-            {usage && (
-              <span title={`Langfuse が計算した推定額です (${new Date(usage.monthStart).toLocaleDateString()} から)。請求額は AWS 側が正です。`}>
-                今日 {usd(usage.todayUsd)} · 今月 {usd(usage.monthUsd)}
-              </span>
-            )}
-            <span>{auth.user}</span>
-            <button style={linkStyle} onClick={() => run("logout")}>
-              ログアウト
-            </button>
+      <TooltipProvider>
+        <div className="flex h-full flex-col">
+          <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
+            <div className="flex items-center gap-2 font-semibold">
+              <div className="bg-primary text-primary-foreground flex size-7 items-center justify-center rounded-md">
+                <MessagesSquare className="size-4" />
+              </div>
+              Rig Chat
+            </div>
+            <div className="ml-auto flex items-center gap-3">
+              {usage && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline" className="gap-1.5 font-normal">
+                      <Wallet />
+                      今日 {usd(usage.todayUsd)} · 今月 {usd(usage.monthUsd)}
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-64">
+                    Langfuse が計算した推定額です ({new Date(usage.monthStart).toLocaleDateString()} から)。請求額は AWS 側が正です。
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {auth.authRequired && (
+                <>
+                  <Separator orientation="vertical" className="!h-5" />
+                  <span className="text-muted-foreground flex items-center gap-1.5 text-sm">
+                    <CircleUser className="size-4" />
+                    {auth.user}
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={() => run("logout")}>
+                    <LogOut />
+                    ログアウト
+                  </Button>
+                </>
+              )}
+            </div>
           </header>
-        )}
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-          {history.enabled && (
-            <nav style={sidebarStyle} aria-label="過去の会話">
-              <button style={newButtonStyle} onClick={() => setConversation(newConversation())}>
-                ＋ 新しい会話
-              </button>
-              <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto" }}>
-                {history.threads.map((t) => (
-                  <li key={t.id} style={{ display: "flex", alignItems: "center" }}>
-                    <button
-                      style={{ ...threadStyle, ...(t.id === conversation.threadId ? activeThreadStyle : {}) }}
-                      title={`${t.title}\n${new Date(t.updatedAt).toLocaleString()}`}
-                      onClick={() => openThread(t.id)}
-                    >
-                      {t.title}
-                    </button>
-                    <button style={deleteStyle} aria-label={`「${t.title}」を削除`} onClick={() => removeThread(t.id)}>
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </nav>
+          {error && (
+            <div className="bg-destructive/10 text-destructive flex items-center gap-2 px-4 py-2 text-sm">
+              <span className="flex-1">{error}</span>
+              <Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setError(undefined)}>
+                <X />
+              </Button>
+            </div>
           )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <CopilotChat
-              agentId="default"
-              threadId={conversation.threadId}
-              labels={{ chatInputPlaceholder: "メッセージを入力…" }}
-            />
+          <div className="flex min-h-0 flex-1">
+            {history.enabled && (
+              <nav className="bg-sidebar text-sidebar-foreground flex w-64 shrink-0 flex-col border-r" aria-label="過去の会話">
+                <div className="p-3">
+                  <Button variant="outline" className="w-full justify-start" onClick={() => setConversation(newConversation())}>
+                    <Plus />
+                    新しい会話
+                  </Button>
+                </div>
+                <p className="text-muted-foreground px-4 pb-1 text-xs font-medium">過去の会話</p>
+                <ScrollArea className="min-h-0 flex-1">
+                  <ul className="grid gap-0.5 px-2 pb-3">
+                    {history.threads.length === 0 && (
+                      <li className="text-muted-foreground px-2 py-1.5 text-sm">まだありません</li>
+                    )}
+                    {history.threads.map((t) => {
+                      const active = t.id === conversation.threadId;
+                      return (
+                        <li key={t.id} className="group relative">
+                          <button
+                            className={cn(
+                              "hover:bg-sidebar-accent flex w-full items-center gap-2 rounded-md py-1.5 pr-8 pl-2 text-left text-sm transition-colors",
+                              active && "bg-sidebar-accent text-sidebar-accent-foreground font-medium",
+                            )}
+                            title={`${t.title}\n${new Date(t.updatedAt).toLocaleString()}`}
+                            onClick={() => openThread(t.id)}
+                          >
+                            <MessageSquare className="text-muted-foreground size-4 shrink-0" />
+                            <span className="truncate">{t.title}</span>
+                          </button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-destructive absolute top-1/2 right-1 size-7 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                            aria-label={`「${t.title}」を削除`}
+                            onClick={() => removeThread(t.id)}
+                          >
+                            <Trash2 />
+                          </Button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </ScrollArea>
+              </nav>
+            )}
+            <main className="min-w-0 flex-1">
+              <CopilotChat
+                agentId="default"
+                threadId={conversation.threadId}
+                labels={{ chatInputPlaceholder: "メッセージを入力…" }}
+              />
+            </main>
           </div>
         </div>
-      </div>
+      </TooltipProvider>
     </CopilotKitProvider>
   );
 }
 
 function Center({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ height: "100vh", display: "grid", placeItems: "center", fontFamily: "sans-serif" }}>
-      <div style={{ textAlign: "center", display: "grid", gap: 12 }}>{children}</div>
-    </div>
-  );
+  return <div className="bg-muted/40 grid h-full place-items-center p-6">{children}</div>;
 }
-
-const buttonStyle: React.CSSProperties = {
-  padding: "10px 24px",
-  borderRadius: 999,
-  border: "none",
-  background: "#111",
-  color: "#fff",
-  fontSize: 15,
-  cursor: "pointer",
-};
-const headerStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "flex-end",
-  alignItems: "center",
-  gap: 12,
-  padding: "8px 16px",
-  fontFamily: "sans-serif",
-  fontSize: 13,
-  color: "#555",
-  borderBottom: "1px solid #eee",
-};
-const linkStyle: React.CSSProperties = {
-  background: "none",
-  border: "none",
-  color: "#2563eb",
-  cursor: "pointer",
-  fontSize: 13,
-};
-const sidebarStyle: React.CSSProperties = {
-  width: 220,
-  flexShrink: 0,
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
-  padding: 12,
-  borderRight: "1px solid #eee",
-  fontFamily: "sans-serif",
-  fontSize: 13,
-};
-const newButtonStyle: React.CSSProperties = {
-  padding: "8px 10px",
-  borderRadius: 8,
-  border: "1px solid #ddd",
-  background: "#fff",
-  cursor: "pointer",
-  textAlign: "left",
-  fontSize: 13,
-};
-const threadStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  padding: "6px 8px",
-  border: "none",
-  borderRadius: 6,
-  background: "none",
-  textAlign: "left",
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  fontSize: 13,
-  color: "#333",
-};
-const activeThreadStyle: React.CSSProperties = { background: "#f0f0f0", fontWeight: 600 };
-const deleteStyle: React.CSSProperties = {
-  border: "none",
-  background: "none",
-  color: "#999",
-  cursor: "pointer",
-  fontSize: 14,
-  padding: "4px 6px",
-};
