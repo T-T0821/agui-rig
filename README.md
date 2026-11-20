@@ -10,6 +10,19 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 
 ## 構成
 
+![アプリの中の構成図 (CopilotKit と Rust のつなぎ)](docs/images/app-architecture.png)
+
+画面の CopilotKit (`CopilotKitProvider` と `CopilotChat`) は、CopilotKit の Node ランタイムを使わず、
+`selfManagedAgents` に登録した `HistoryAgent` (AG-UI の `HttpAgent` を拡張したもの) で Rust に直接つなぎます。
+
+- ① 送信すると、`HistoryAgent` が会話と threadId を `RunAgentInput` にして `POST http://127.0.0.1:<port>/agent` に送る。URL と起動ごとの鍵は、最初に `invoke("agent_endpoint")` で受け取る
+- ② Rust は Rig の実行の様子を AG-UI のイベント (`RUN_STARTED`、`TEXT_MESSAGE_*`、`TOOL_CALL_*`、`RUN_FINISHED`) にして SSE で返す。文章は `CopilotChat`、ツール呼び出しは `renderToolCalls` に登録した `ToolCallCard` が表示する
+- 過去の会話を開くときは、`HistoryAgent.connect` が保存済みのメッセージを `MESSAGES_SNAPSHOT` として返して画面に復元する
+- ログイン、会話一覧、利用料金は AG-UI ではなく、Tauri の `invoke` で Rust のコマンドを呼ぶ
+
+<details>
+<summary>テキスト版</summary>
+
 ```
 ┌───────────────────────── Tauri アプリ (1 プロセス) ─────────────────────────┐
 │ WebView (React)                    Rust                                     │
@@ -24,6 +37,8 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 │                                           └─▶ stdio MCP サーバー (子プロセス)│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 1. 「ログイン」で OS の既定ブラウザが開き、共通基盤でログインする。リダイレクトは `http://127.0.0.1:<port>/callback` で受ける (RFC 8252、クライアントシークレットなし)。
 2. Rust が ID トークンを STS に渡して一時認証情報を得る。期限前に SDK が自動で取り直し、ID トークンもリフレッシュトークンで自動更新する。**トークンと認証情報は Rust のメモリ上だけに置き、WebView には渡さない。**
