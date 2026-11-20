@@ -6,11 +6,20 @@ locals {
   usage_enabled = var.langfuse_secret_arn != ""
 }
 
+# Lambda のコードは TypeScript (lambda/usage/src/index.ts)。
+# terraform plan の前に `npm --prefix lambda/usage ci && npm --prefix lambda/usage run build` で dist/index.mjs を作る。
 data "archive_file" "usage" {
   count       = local.usage_enabled ? 1 : 0
   type        = "zip"
-  source_file = "${path.module}/lambda/usage/index.js"
+  source_file = "${path.module}/lambda/usage/dist/index.mjs"
   output_path = "${path.module}/.build/usage.zip"
+
+  lifecycle {
+    precondition {
+      condition     = fileexists("${path.module}/lambda/usage/dist/index.mjs")
+      error_message = "利用料金の Lambda がビルドされていません。先に npm --prefix lambda/usage ci && npm --prefix lambda/usage run build を実行してください。"
+    }
+  }
 }
 
 data "aws_iam_policy_document" "lambda_trust" {
