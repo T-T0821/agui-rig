@@ -7,6 +7,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "OAUTH_CLIENT_ID",
     "OAUTH_SCOPES",
     "OAUTH_REDIRECT_PORT",
+    "OAUTH_REDIRECT_HOST",
     "AWS_REGION",
     "AWS_ROLE_ARN",
     "AWS_ENDPOINT_URL_STS",
