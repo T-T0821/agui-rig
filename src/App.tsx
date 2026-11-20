@@ -11,6 +11,9 @@ type AgentEndpoint = { url: string; token: string };
 type AuthStatus = { authRequired: boolean; loggedIn: boolean; user: string | null };
 type ThreadSummary = { id: string; title: string; updatedAt: string };
 type ThreadList = { enabled: boolean; threads: ThreadSummary[] };
+type Usage = { todayUsd: number; monthUsd: number; monthStart: string };
+
+const usd = (v: number) => (v > 0 && v < 0.01 ? "< $0.01" : `$${v < 10 ? v.toFixed(2) : v.toFixed(1)}`);
 /** 表示中の会話。切り替えるときは agent ごと作り直す */
 type Conversation = { threadId: string; messages: Message[] };
 
@@ -45,6 +48,18 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [conversation, setConversation] = useState<Conversation>(newConversation);
   const [history, setHistory] = useState<ThreadList>({ enabled: false, threads: [] });
+  const [usage, setUsage] = useState<Usage | null>(null);
+
+  // 利用料金 (AppSync → Lambda → Langfuse)。Langfuse の集計は少し遅れるので、定期的にも読み直す
+  const refreshUsage = useCallback(() => {
+    invoke<Usage | null>("usage_summary").then(setUsage, (e) => console.warn("利用料金を読めません", e));
+  }, []);
+  useEffect(() => {
+    if (!auth?.loggedIn) return;
+    refreshUsage();
+    const timer = setInterval(refreshUsage, 60_000);
+    return () => clearInterval(timer);
+  }, [auth, refreshUsage]);
 
   // チャット履歴 (AppSync)。Rust 側が ID トークンで読み書きする
   const refreshHistory = useCallback(() => {
@@ -114,9 +129,14 @@ export default function App() {
       conversation.messages,
     );
     // 1 回の実行が終わるたびに (Rust 側で保存済み) 一覧を読み直す
-    agent.subscribe({ onRunFinalized: () => refreshHistory() });
+    agent.subscribe({
+      onRunFinalized: () => {
+        refreshHistory();
+        setTimeout(refreshUsage, 5_000);
+      },
+    });
     return { default: agent };
-  }, [endpoint, conversation, refreshHistory]);
+  }, [endpoint, conversation, refreshHistory, refreshUsage]);
 
   if (!auth || !agents) {
     return <Center>{error ? `エラー: ${error}` : "起動中…"}</Center>;
@@ -145,6 +165,11 @@ export default function App() {
       <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
         {auth.authRequired && (
           <header style={headerStyle}>
+            {usage && (
+              <span title={`Langfuse が計算した推定額です (${new Date(usage.monthStart).toLocaleDateString()} から)。請求額は AWS 側が正です。`}>
+                今日 {usd(usage.todayUsd)} · 今月 {usd(usage.monthUsd)}
+              </span>
+            )}
             <span>{auth.user}</span>
             <button style={linkStyle} onClick={() => run("logout")}>
               ログアウト

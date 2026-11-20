@@ -48,6 +48,8 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
     })}.mock`;
   /** チャット履歴 (sub → 会話 ID → 会話)。メモリだけなので、模擬サーバーを止めると消える。 */
   const threads = new Map();
+  /** 模擬の利用料金 (Bedrock の模擬応答のトークン数 × 例の単価)。本物は Langfuse が計算する */
+  let mockCostUsd = 0;
   const keyOf = (req) => (req.headers.authorization ?? "").match(/Credential=(\w+)/)?.[1];
 
   const server = createServer(async (req, res) => {
@@ -165,6 +167,7 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
         send("messageStop", { stopReason: "end_turn" });
       }
       send("metadata", { usage: { inputTokens: 120, outputTokens: 40, totalTokens: 160 }, metrics: { latencyMs: 1 } });
+      mockCostUsd += 120 * 3e-6 + 40 * 15e-6;
       return res.end();
     }
 
@@ -192,6 +195,10 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       } else if (query.includes("deleteThread")) {
         data = { deleteThread: mine.delete(variables.id) || true };
         log("AppSync: deleteThread", variables.id.slice(0, 8));
+      } else if (query.includes("usage")) {
+        const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
+        data = { usage: { todayUsd: mockCostUsd, monthUsd: mockCostUsd + 1.234, monthStart } };
+        log("AppSync: usage", `今日 $${mockCostUsd.toFixed(4)}`);
       } else if (query.includes("threads")) {
         data = { threads: [...mine.values()].map(({ id, title, updatedAt }) => ({ id, title, updatedAt })) };
         log("AppSync: threads", data.threads.length, "件");

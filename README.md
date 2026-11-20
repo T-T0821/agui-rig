@@ -71,6 +71,8 @@ flowchart LR
   App -- "⑤ ID トークン" --> AppSync
   AppSync -. "JWKS で検証" .-> IdP
   AppSync -- "sub ごとに読み書き" --> DDB
+  AppSync -- "利用料金 (sub)" --> Usage["Lambda (VPC)"]
+  Usage -- "集計 API" --> Langfuse
   App -- "⑥ OTLP/HTTP" --> Collector
   Collector --> Langfuse
 ```
@@ -82,6 +84,7 @@ flowchart LR
 | ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
 | ⑤ アプリ → AppSync → DynamoDB | ID トークン (AppSync の OpenID Connect 認証) | チャット履歴。リゾルバーが ID トークンの `sub` だけで利用者を分ける |
+| ⑤' アプリ → AppSync → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (今日・今月)。Langfuse のキーは Lambda だけが持つ |
 | ⑥ アプリ → OTel Collector → Langfuse | Collector 側の設定による | トレース、トークン数、料金の内訳 |
 
 - PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
@@ -197,11 +200,11 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
-| `CHAT_API_URL` | チャット履歴の AppSync GraphQL URL。未設定なら保存しない。ログインしていないとき (`dev:aws`) は使わない |
+| `CHAT_API_URL` | チャット履歴と利用料金の AppSync GraphQL URL。未設定なら使わない。ログインしていないとき (`dev:aws`) も使わない |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
-| `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力・利用者 ID もトレースに含める (既定は含めない) |
+| `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力もトレースに含める (既定は含めない。利用者 ID の `sub` は常に送る) |
 | `RUST_LOG` | ログの詳しさ (既定 `info`) |
 
 ### トレース (Langfuse)
@@ -215,8 +218,8 @@ Langfuse での見え方:
 - その下に、モデル呼び出し (`chat`、Generation として表示) とツール呼び出し (`execute_tool <ツール名>`) が順に並ぶ
 - 失敗した実行とツールは ERROR レベルになる
 
-本文 (プロンプト、回答、ツールの入出力) と利用者 ID (STS のセッション名と同じメールなど) は、
-`TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。ID トークンや AWS の認証情報は送りません。
+本文 (プロンプト、回答、ツールの入出力) は `TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。
+利用者 ID には ID トークンの `sub` (不透明な ID) を常に送ります。ID トークンや AWS の認証情報は送りません。
 
 #### 料金の計測
 
@@ -251,7 +254,24 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 
 - 単価はリージョンや推論プロファイル (グローバル / リージョン) で変わることがあります。使っているものの単価を入れてください
 - Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。請求額は AWS の Cost Explorer が正です
-- 利用者別に見るには `TELEMETRY_RECORD_CONTENT=true` が必要です (利用者 ID はこのときだけ送るため)
+- 利用者 ID には ID トークンの `sub` を常に送ります (メールなどではない不透明な ID)。利用者別の集計と、画面の利用料金表示に使います
+
+#### 画面に利用料金を出す
+
+ログイン中は、ヘッダーに「今日 $x · 今月 $y」を出します (Langfuse が計算した推定額)。
+
+```
+アプリ ─(ID トークン)→ AppSync の usage クエリ ─(検証済みの sub だけ)→ Lambda (VPC 内)
+      → Langfuse の /api/public/metrics/daily?userId=<sub>  (キーは Secrets Manager)
+```
+
+- Langfuse のキーはプロジェクト全体を読めるので、PC には置かず Lambda だけが持ちます。Lambda は呼び出した本人の `sub` の金額だけを返します
+- `infra/chat-history.yaml` に `LangfuseSecretArn`、`LangfuseHost` (Lambda から届く Langfuse の URL)、
+  `LambdaSubnetIds`、`LambdaSecurityGroupIds` を渡すと作られます (空なら作らず、画面にも出ません)。
+  シークレットの中身は `{"publicKey": "pk-lf-...", "secretKey": "sk-lf-..."}` です
+- Lambda のサブネットからは、EKS 上の Langfuse と Secrets Manager (VPC エンドポイントか NAT) に届く必要があります
+- 「今日」「今月」の区切りは `UtcOffsetMinutes` (既定 540 = 日本時間) です
+- Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
 
 > **配布するときの注意**: Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、
 > 利用者の PC に配るアプリへ直接入れるのは避けてください。本番では、キーを持った

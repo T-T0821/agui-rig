@@ -65,6 +65,8 @@ pub struct Session {
     pub user: String,
     /// AWS のロールセッション名に使う ID (email / preferred_username / sub)
     pub principal: String,
+    /// ID トークンの sub (利用者の不変の ID)。トレースの利用者 ID に使い、利用料金の集計キーになる
+    pub sub: String,
     /// ID トークンの有効期限 (UNIX 秒)
     pub expires_at: u64,
 }
@@ -83,12 +85,14 @@ impl Session {
             .find_map(|k| claims.get(*k).and_then(|v| v.as_str()))
             .unwrap_or("user")
             .to_string();
+        let sub = claims.get("sub").and_then(|v| v.as_str()).ok_or("ID トークンに sub がありません")?.to_string();
         let expires_at = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(now() + 3600);
         Ok(Self {
             id_token,
             refresh_token: tokens.refresh_token.or(previous_refresh),
             user,
             principal,
+            sub,
             expires_at,
         })
     }

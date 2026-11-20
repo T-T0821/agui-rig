@@ -36,6 +36,15 @@ pub struct ThreadSummary {
     pub updated_at: String,
 }
 
+/// 利用料金 (Langfuse が計算したもの、USD)。
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub today_usd: f64,
+    pub month_usd: f64,
+    pub month_start: String,
+}
+
 /// 会話のタイトル: 最初の利用者メッセージの先頭 40 文字。
 fn title_of(messages: &[Value]) -> String {
     let text = messages
@@ -154,6 +163,12 @@ impl History {
             Some(gz) => decode(gz),
             None => Ok(vec![]),
         }
+    }
+
+    /// 自分の利用料金。API 側で利用料金の機能を作っていなければ None。
+    pub async fn usage(&self) -> Result<Option<Usage>, String> {
+        let data = self.graphql("query { usage { todayUsd monthUsd monthStart } }", json!({})).await?;
+        serde_json::from_value(data["usage"].clone()).map_err(|e| e.to_string())
     }
 
     /// 会話を消す。
