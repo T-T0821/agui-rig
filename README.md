@@ -108,6 +108,41 @@ Langfuse での見え方:
 本文 (プロンプト、回答、ツールの入出力) と利用者 ID (STS のセッション名と同じメールなど) は、
 `TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。ID トークンや AWS の認証情報は送りません。
 
+#### 料金の計測
+
+モデル呼び出しのスパンには、トークン数を重ならない 4 つの区分に分けて載せています
+(`langfuse.observation.usage_details`)。Langfuse はこれにモデル定義の単価を掛けて、
+呼び出し・トレース・利用者・セッションごとの料金を出します。
+
+| キー | 中身 |
+| --- | --- |
+| `input` | キャッシュを使わなかった入力トークン |
+| `output` | 出力トークン |
+| `cache_read_input_tokens` | キャッシュから読んだ入力トークン |
+| `cache_creation_input_tokens` | キャッシュに書いた入力トークン |
+
+Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfuse 組み込みの単価表に
+一致しないことがあるので、使うモデルごとにモデル定義を 1 件追加します。
+
+1. Langfuse の **Project Settings → Models** で **Add model definition** を押す
+   (トレース画面の Generation に出ているモデル名のバッジからも作れます)
+2. **Model name**: 分かりやすい名前 (例 `bedrock-claude-sonnet-5-5`)
+3. **Match pattern**: アプリが送るモデル ID に一致する正規表現。
+   推論プロファイルの接頭辞 (`global.` / `us.` / `apac.` など) の有無を両方含めておくと安全です
+   ```
+   (?i)^(global\.|us\.|eu\.|apac\.|jp\.)?anthropic\.claude-sonnet-5-5.*$
+   ```
+4. **Prices**: 上の 4 つのキーそれぞれに、1 トークンあたりの USD 単価を入れる
+   (Bedrock の料金ページの「100 万トークンあたり」の金額 ÷ 1,000,000)。
+   キー名は上の表と完全に一致させてください。一致しないキーは料金 0 になります
+5. 保存すると、それ以降に届いたトレースに料金が付きます (過去分には付きません)
+
+注意:
+
+- 単価はリージョンや推論プロファイル (グローバル / リージョン) で変わることがあります。使っているものの単価を入れてください
+- Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。請求額は AWS の Cost Explorer が正です
+- 利用者別に見るには `TELEMETRY_RECORD_CONTENT=true` が必要です (利用者 ID はこのときだけ送るため)
+
 > **配布するときの注意**: Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、
 > 利用者の PC に配るアプリへ直接入れるのは避けてください。本番では、キーを持った
 > OpenTelemetry Collector (社内のゲートウェイ) を立てて、アプリは `OTEL_EXPORTER_OTLP_ENDPOINT` でそこに送る構成にします。

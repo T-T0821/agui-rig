@@ -151,6 +151,7 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
             name: "chat",
             operation: "chat",
             system_instructions: system.as_deref(),
+            langfuse.observation.usage_details = Empty,
         );
         telemetry_content::record_model_input(&generation, &history, content);
 
@@ -199,6 +200,7 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
 
         let response = stream.finish().instrument(generation.clone()).await.map_err(|e| e.to_string())?;
         telemetry_content::record_model_output(&generation, &response.choice, content);
+        generation.record("langfuse.observation.usage_details", usage_details(&response.usage).as_str());
         drop(generation);
         let calls: Vec<_> = response
             .choice
@@ -272,4 +274,40 @@ async fn call_tool(runtime: &Runtime, thread_id: &str, name: &str, call_id: &str
         span.record("langfuse.observation.output", output.as_str());
     }
     output
+}
+
+/// Langfuse の料金計算用に、トークン数を重ならない区分に分けて渡す。
+/// Rig の input_tokens はキャッシュの読み書きを含むので、その分を引いたものを `input` にする。
+/// Langfuse のモデル定義では、この 4 つのキーに単価を設定する。
+fn usage_details(usage: &rig_core::completion::Usage) -> String {
+    let cache_read = usage.cached_input_tokens.unwrap_or(0);
+    let cache_write = usage.cache_creation_input_tokens.unwrap_or(0);
+    let input = usage.input_tokens.unwrap_or(0).saturating_sub(cache_read + cache_write);
+    serde_json::json!({
+        "input": input,
+        "output": usage.output_tokens.unwrap_or(0),
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usage_details;
+    use rig_core::completion::Usage;
+
+    #[test]
+    fn usage_details_splits_cached_input() {
+        let mut usage = Usage::default();
+        usage.input_tokens = Some(1000);
+        usage.output_tokens = Some(50);
+        usage.cached_input_tokens = Some(700);
+        usage.cache_creation_input_tokens = Some(200);
+        let v: serde_json::Value = serde_json::from_str(&usage_details(&usage)).unwrap();
+        assert_eq!(v["input"], 100);
+        assert_eq!(v["output"], 50);
+        assert_eq!(v["cache_read_input_tokens"], 700);
+        assert_eq!(v["cache_creation_input_tokens"], 200);
+    }
 }
