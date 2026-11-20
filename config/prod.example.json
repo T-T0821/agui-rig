@@ -1,0 +1,8 @@
+{
+  "OAUTH_ISSUER": "https://auth.example.com",
+  "OAUTH_CLIENT_ID": "chat-app",
+  "AWS_REGION": "ap-northeast-1",
+  "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/chat-app-bedrock",
+  "BEDROCK_MODEL_ID": "global.anthropic.claude-sonnet-5-5",
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel-gateway.example.com"
+}

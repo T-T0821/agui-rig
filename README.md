@@ -163,6 +163,51 @@ ANTHROPIC_API_KEY=...
 
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
 
+## 配布するとき (設定の渡し方)
+
+`.env` は開発用です。リリースビルドでは読みません。配布物では、設定を次の 3 段で渡します。上の段ほど優先です。
+
+| 優先 | 置き場所 | 用途 |
+| --- | --- | --- |
+| 1 | 環境変数 (開発ビルドでは `.env` も) | 開発中、または一時的な上書き |
+| 2 | アプリの設定フォルダの `config.json` | 利用者・端末ごとの上書き (MDM やグループポリシーで配ることもできます) |
+| 3 | ビルド時に埋め込んだ設定 | 環境 (開発 / 本番) ごとの既定値 |
+
+設定フォルダの場所 (`mcp.json` と同じフォルダ):
+
+- Windows: `%APPDATA%\dev.example.rig-agui-chat\config.json`
+- macOS: `~/Library/Application Support/dev.example.rig-agui-chat/config.json`
+- Linux: `~/.config/dev.example.rig-agui-chat/config.json`
+
+フォルダ名は `src-tauri/tauri.conf.json` の `identifier` です。配布前に自分たちの値に変えてください。
+
+### 環境ごとにビルドする
+
+設定ファイルは、キーが環境変数と同じ名前の JSON です。例は `config/dev.example.json` と `config/prod.example.json` にあります。
+
+```sh
+cp config/prod.example.json config/prod.json   # 値を本番用に書き換える
+APP_CONFIG=config/prod.json npx tauri build
+```
+
+```powershell
+# Windows (PowerShell)
+$env:APP_CONFIG="config/prod.json"; npx tauri build
+```
+
+`APP_CONFIG` を指定しなければ、何も埋め込みません。
+
+### 書けるキーと書けないキー
+
+- 書ける: `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE`、`BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`RUST_LOG`
+- 書けない (秘密情報): `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`OTEL_EXPORTER_OTLP_HEADERS`、`ANTHROPIC_API_KEY`、AWS のアクセスキー
+  - ビルド時の設定に入っていると、ビルドが失敗します
+  - `config.json` に入っていると、無視して起動ログに書きます
+- 値はすべて文字列で書きます (`"true"`、`"53682"` など)
+- 一覧は `src-tauri/src/config_keys.rs` にあります
+
+起動時のログ (標準エラー) に、どのキーをどこから読んだかが出ます。値そのものは出しません。
+
 ## ファイル
 
 | パス | 内容 |
@@ -175,6 +220,7 @@ AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT
 | `src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
 | `src-tauri/src/tools/` | Code Interpreter と stdio MCP |
 | `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
+| `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
 | `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 

@@ -2,6 +2,7 @@ mod agent;
 mod agui;
 mod auth;
 mod aws;
+mod config;
 mod server;
 mod telemetry;
 mod tools;
@@ -179,8 +180,12 @@ fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = dotenvy::dotenv();
+    // 設定 (環境変数 / .env、アプリ設定フォルダの config.json、ビルド時の設定) を読む
+    let loaded = config::load();
     telemetry::init();
+    for note in loaded.notes {
+        tracing::info!("設定: {note}");
+    }
 
     // AG-UI サーバー: ポートは AGENT_PORT で固定でき、未指定なら空いているポート
     let port: u16 = std::env::var("AGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
