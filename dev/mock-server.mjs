@@ -1,5 +1,5 @@
 // 開発用の模擬サーバー (1 つのポートで全部): 共通基盤 OAuth (OIDC)、AWS STS、Bedrock (ConverseStream)、
-// AgentCore Code Interpreter、Langfuse の OTLP 受け口。
+// AgentCore Code Interpreter、AppSync (チャット履歴)、Langfuse の OTLP 受け口。
 // 本物のサービスなしで、ログイン → ツール呼び出し → 回答 → トレース送信までの流れを試すためのもの。
 //
 // 単体で起動: node dev/mock-server.mjs   (既定 http://127.0.0.1:9100、MOCK_PORT で変更)
@@ -46,6 +46,8 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       ...MOCK_USER,
       exp: Math.floor(Date.now() / 1000) + 3600,
     })}.mock`;
+  /** チャット履歴 (sub → 会話 ID → 会話)。メモリだけなので、模擬サーバーを止めると消える。 */
+  const threads = new Map();
   const keyOf = (req) => (req.headers.authorization ?? "").match(/Credential=(\w+)/)?.[1];
 
   const server = createServer(async (req, res) => {
@@ -164,6 +166,43 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       }
       send("metadata", { usage: { inputTokens: 120, outputTokens: 40, totalTokens: 160 }, metrics: { latencyMs: 1 } });
       return res.end();
+    }
+
+    // ---- AppSync (チャット履歴の GraphQL API。OpenID Connect 認証) ----
+    if (url.pathname === "/graphql") {
+      // 本物の AppSync と同じく、ID トークンの sub で利用者を分ける (模擬なので署名は検証しない)
+      let sub;
+      try {
+        sub = JSON.parse(Buffer.from((req.headers.authorization ?? "").split(".")[1], "base64url").toString()).sub;
+      } catch {}
+      if (!sub) {
+        res.writeHead(401, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ errors: [{ errorType: "UnauthorizedException", message: "Valid authorization header not provided." }] }));
+      }
+      const { query, variables = {} } = JSON.parse(text);
+      const mine = threads.get(sub) ?? new Map();
+      threads.set(sub, mine);
+      let data;
+      if (query.includes("saveThread")) {
+        const prev = mine.get(variables.id);
+        const now = new Date().toISOString();
+        mine.set(variables.id, { id: variables.id, title: variables.title, messagesGz: variables.messagesGz, updatedAt: now, createdAt: prev?.createdAt ?? now });
+        data = { saveThread: { id: variables.id } };
+        log("AppSync: saveThread", variables.id.slice(0, 8), `「${variables.title}」`, `${variables.messagesGz.length} 文字`);
+      } else if (query.includes("deleteThread")) {
+        data = { deleteThread: mine.delete(variables.id) || true };
+        log("AppSync: deleteThread", variables.id.slice(0, 8));
+      } else if (query.includes("threads")) {
+        data = { threads: [...mine.values()].map(({ id, title, updatedAt }) => ({ id, title, updatedAt })) };
+        log("AppSync: threads", data.threads.length, "件");
+      } else if (query.includes("thread(")) {
+        const t = mine.get(variables.id);
+        data = { thread: t ? { messagesGz: t.messagesGz } : null };
+        log("AppSync: thread", variables.id.slice(0, 8), t ? "" : "(なし)");
+      } else {
+        data = null;
+      }
+      return json({ data });
     }
 
     // ---- Langfuse (OTLP/HTTP の受け口) ----

@@ -19,6 +19,9 @@ pub struct RunAgentInput {
     /// CopilotKit の `useAgentContext` などで渡される追加コンテキスト。
     #[serde(default)]
     pub context: Vec<ContextItem>,
+    /// 受け取ったままのメッセージ (履歴の保存用)。server.rs が入れる
+    #[serde(skip)]
+    pub raw_messages: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

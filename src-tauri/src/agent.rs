@@ -15,6 +15,7 @@ use rig_core::telemetry::{self as telemetry_content, completion_parent_span};
 
 use crate::agui::{Event, RunAgentInput};
 use crate::telemetry;
+use crate::history::History;
 use crate::tools::Tools;
 
 const SYSTEM_PROMPT: &str = "あなたは親切なアシスタントです。日本語で簡潔に答えてください。\
@@ -30,6 +31,8 @@ pub struct Runtime {
     pub tools: Tools,
     /// トレースに載せる利用者 (STS のセッション名と同じ、メールなど)。開発モードでは None
     pub user: Option<String>,
+    /// チャット履歴の保存先 (CHAT_API_URL 未設定、または未ログインなら None)
+    pub history: Option<Arc<History>>,
 }
 
 /// AG-UI のメッセージ履歴を Rig のメッセージに変換する。
@@ -108,7 +111,20 @@ pub async fn run(runtime: &Runtime, input: RunAgentInput, emit: impl Fn(Event)) 
     }
 
     emit(Event::RunStarted { thread_id: input.thread_id.clone(), run_id: input.run_id.clone() });
-    match run_loop(runtime, &input, &emit).instrument(span.clone()).await {
+    let mut produced = Vec::new();
+    let result = run_loop(runtime, &input, &emit, &mut produced).instrument(span.clone()).await;
+
+    // 会話を保存してから終了を知らせる (画面が一覧を読み直したときに反映されているように)。
+    // 保存に失敗してもチャット自体は成功扱いにする
+    if let Some(history) = &runtime.history {
+        let mut messages = input.raw_messages.clone();
+        messages.extend(produced);
+        if let Err(e) = history.save(&input.thread_id, &messages).instrument(span.clone()).await {
+            span.in_scope(|| tracing::warn!("チャット履歴を保存できません: {e}"));
+        }
+    }
+
+    match result {
         Ok(answer) => {
             if content {
                 span.record("langfuse.trace.output", answer);
@@ -126,7 +142,13 @@ pub async fn run(runtime: &Runtime, input: RunAgentInput, emit: impl Fn(Event)) 
 }
 
 /// 成功したら最後の回答テキストを返す (トレース用)。
-async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event)) -> Result<String, String> {
+/// この実行で増えたメッセージ (AG-UI の形) は `produced` に足していく (履歴の保存用)。
+async fn run_loop(
+    runtime: &Runtime,
+    input: &RunAgentInput,
+    emit: &impl Fn(Event),
+    produced: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
     let mut history = to_history(input);
     if !matches!(history.last(), Some(Message::User { .. })) {
         return Err("送信するメッセージがありません".into());
@@ -212,12 +234,20 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
             })
             .collect();
         if calls.is_empty() {
+            if !answer.is_empty() {
+                produced.push(serde_json::json!({ "id": message_id, "role": "assistant", "content": answer }));
+            }
             return Ok(answer);
         }
 
         // ツールを実行して結果を履歴に足し、もう一度モデルを呼ぶ
         history.push(Message::Assistant(AssistantMessage::new(response.choice.clone())));
         let mut results = Vec::new();
+        let mut assistant = serde_json::json!({ "id": message_id, "role": "assistant", "toolCalls": [] });
+        if !answer.is_empty() {
+            assistant["content"] = answer.clone().into();
+        }
+        let mut tool_messages = Vec::new();
         for (index, call) in calls {
             let name = call.function.name.to_string();
             let output = call_tool(runtime, &input.thread_id, &name, &call.id.to_string(), &call.function.arguments).await;
@@ -226,8 +256,20 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
                 .find(|(part, _)| part.index() == index)
                 .map(|(_, id)| id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let result_id = uuid::Uuid::new_v4().to_string();
+            assistant["toolCalls"].as_array_mut().unwrap().push(serde_json::json!({
+                "id": ag_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::Value::Object(call.function.arguments.clone()).to_string(),
+                },
+            }));
+            tool_messages.push(serde_json::json!({
+                "id": result_id, "role": "tool", "toolCallId": ag_id, "content": output,
+            }));
             emit(Event::ToolCallResult {
-                message_id: uuid::Uuid::new_v4().to_string(),
+                message_id: result_id,
                 tool_call_id: ag_id,
                 content: output.clone(),
                 role: "tool",
@@ -235,6 +277,8 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
             results.push(call.result(vec![ToolResultContent::text(output)]));
         }
         history.push(Message::tool_results(results));
+        produced.push(assistant);
+        produced.extend(tool_messages);
     }
     Err(format!("ツールの呼び出しが {MAX_STEPS} 回を超えたので止めました"))
 }

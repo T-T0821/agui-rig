@@ -45,7 +45,7 @@ impl IdToken {
     pub fn set(&self, token: String) {
         *self.0.write().unwrap() = token;
     }
-    fn get(&self) -> String {
+    pub fn get(&self) -> String {
         self.0.read().unwrap().clone()
     }
 }

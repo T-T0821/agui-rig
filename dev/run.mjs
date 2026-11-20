@@ -51,6 +51,7 @@ if (mode === "mock") {
     CODE_INTERPRETER_ID: "aws.codeinterpreter.v1",
     LLM_MODEL: "",
     MCP_CONFIG: exampleMcpConfig(),
+    CHAT_API_URL: `${base}/graphql`,
     LANGFUSE_HOST: base,
     LANGFUSE_PUBLIC_KEY: MOCK_LANGFUSE.publicKey,
     LANGFUSE_SECRET_KEY: MOCK_LANGFUSE.secretKey,

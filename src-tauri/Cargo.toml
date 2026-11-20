@@ -45,6 +45,7 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
 url = "2"
+flate2 = "1"
 
 # ログとトレース (OpenTelemetry → Langfuse などの OTLP 受け口)
 tracing = "0.1"

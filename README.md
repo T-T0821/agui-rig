@@ -5,6 +5,7 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 - **モデル**: Amazon Bedrock (Rig の `rig-bedrock`)
 - **認証**: 共通基盤の OAuth (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
 - **ツール**: Amazon Bedrock AgentCore Code Interpreter と、PC 上で起動する stdio MCP サーバー
+- **チャット履歴**: AWS AppSync (OpenID Connect 認証) 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
 - **画面との接続**: AG-UI プロトコル。フロントは `@ag-ui/client` の `HttpAgent` で Rust の AG-UI エンドポイントに直接つなぐ (CopilotKit の Node ランタイムは使わない)
 
 ## 構成
@@ -39,6 +40,56 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 - Code Interpreter のセッションはチャットのスレッドごとに 1 つ作るので、同じスレッドでは変数やファイルが引き継がれる。ログアウトやアプリ終了で止める。
 - MCP サーバーはアプリ起動時に子プロセスとして起動し、終了時に止める。**AWS の認証情報などを渡さないよう、環境変数は `PATH` など最小限だけ引き継ぐ** (必要なものは mcp.json の `env` に書く)。Windows では `npx` などのバッチファイルも動くよう `cmd /C` 経由で、コンソールウィンドウを出さずに起動する。
 
+## AWS 構成
+
+サーバーは置かず、各 PC のアプリ (Rust) が AWS を直接呼びます。AWS の長期キーは PC に置きません。
+
+```mermaid
+flowchart LR
+  subgraph PC["利用者の PC"]
+    App["Tauri アプリ (Rust)<br/>トークンと一時認証情報はメモリだけ"]
+  end
+  IdP["共通基盤 OAuth (OIDC)<br/>Auth0 など"]
+  subgraph AWS["AWS アカウント"]
+    STS["STS<br/>AssumeRoleWithWebIdentity"]
+    IAM["IAM<br/>OIDC プロバイダー + ロール"]
+    Bedrock["Bedrock Runtime<br/>ConverseStream"]
+    CI["AgentCore<br/>Code Interpreter"]
+    AppSync["AppSync<br/>GraphQL (OIDC 認証)"]
+    DDB[("DynamoDB<br/>チャット履歴")]
+    subgraph EKS["EKS"]
+      Collector["OTel Collector"]
+      Langfuse["Langfuse"]
+    end
+  end
+  App -- "① PKCE ログイン" --> IdP
+  App -- "② ID トークン" --> STS
+  STS -. "信頼を確認" .-> IAM
+  STS -. "JWKS で検証" .-> IdP
+  App -- "③ SigV4 (一時認証情報)" --> Bedrock
+  App -- "④ SigV4" --> CI
+  App -- "⑤ ID トークン" --> AppSync
+  AppSync -. "JWKS で検証" .-> IdP
+  AppSync -- "sub ごとに読み書き" --> DDB
+  App -- "⑥ OTLP/HTTP" --> Collector
+  Collector --> Langfuse
+```
+
+| 通信 | 認証 | 用途 |
+| --- | --- | --- |
+| ① アプリ → 共通基盤 OAuth | Authorization Code + PKCE (シークレットなし) | ログイン、ID トークンとリフレッシュトークンの取得 |
+| ② アプリ → STS | ID トークン | ロールの一時認証情報 (最大 1 時間、自動更新) |
+| ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
+| ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
+| ⑤ アプリ → AppSync → DynamoDB | ID トークン (AppSync の OpenID Connect 認証) | チャット履歴。リゾルバーが ID トークンの `sub` だけで利用者を分ける |
+| ⑥ アプリ → OTel Collector → Langfuse | Collector 側の設定による | トレース、トークン数、料金の内訳 |
+
+- PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
+- 利用の記録は CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額は Cost Explorer で確認します。
+- 履歴を AppSync 経由にしているのは、AppSync が ID トークンを検証して `sub` を取り出すので、利用者を偽れないためです
+  (IAM 認証だと、AppSync に見えるのはアプリが付けた STS のセッション名で、なりすましを防ぎにくい)。
+  このため、アプリのロールに DynamoDB の権限は要りません。
+
 ## AWS 側の準備
 
 1. **IAM の OIDC プロバイダー**: 共通基盤の issuer URL を登録し、audience に OAuth のクライアント ID を入れる。issuer は HTTPS で公開されていて、AWS から JWKS を取得できる必要がある。
@@ -68,6 +119,26 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 
 `Resource` は、使うモデル (推論プロファイル) と Code Interpreter の ARN に絞るのがおすすめです。CloudTrail には、ロールセッション名として `chat-<email または sub>` が残ります。
 
+3. **チャット履歴 (AppSync + DynamoDB)**: `infra/chat-history.yaml` (CloudFormation) で作ります。
+
+```sh
+aws cloudformation deploy \
+  --template-file infra/chat-history.yaml \
+  --stack-name agui-rig-chat-history \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides OidcIssuer=https://auth.example.com/ OidcClientId=chat-app
+aws cloudformation describe-stacks --stack-name agui-rig-chat-history \
+  --query "Stacks[0].Outputs[?OutputKey=='GraphQLUrl'].OutputValue" --output text
+```
+
+出てきた URL をアプリの `CHAT_API_URL` に設定します (未設定なら履歴は保存しません)。
+
+- `OidcIssuer` は ID トークンの `iss` と**完全に一致**させてください (Auth0 は末尾に `/` が付きます)
+- テーブルは `pk` = 利用者の `sub`、`sk` = 会話 ID。会話 1 件を 1 項目にし、メッセージは gzip + base64 で 1 つの属性に入れます。
+  上限 (400KB) を超えそうなときは、長いツールの出力を切り詰め、それでも大きければ古いメッセージから落とします
+- 一覧は 1 人あたり新しい順に最大 200 件です
+- リゾルバーは `ctx.identity.sub` 以外の利用者を指定できないので、他人の会話には届きません
+
 ## 動かし方
 
 必要なもの: Node.js 20 以上、Rust 1.97.1 以上、[Tauri の前提パッケージ](https://v2.tauri.app/start/prerequisites/) (Windows は WebView2 と MSVC ビルドツール)。
@@ -86,6 +157,7 @@ AgentCore Code Interpreter、Langfuse をすべてそこに向けた状態でア
 - 何か送ると、模擬の Bedrock が決まった筋書きで MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
   (画面やツール表示の開発向け。回答の中身は意味のあるものではありません)
 - 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
+- 模擬の AppSync がチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
 - 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Langfuse へのトレース送信など) はターミナルに `[mock]` で出ます
 - 例の MCP サーバー (`examples/time-mcp`) の依存は、初回に自動でインストールします
 
@@ -125,6 +197,7 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
+| `CHAT_API_URL` | チャット履歴の AppSync GraphQL URL。未設定なら保存しない。ログインしていないとき (`dev:aws`) は使わない |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
@@ -259,6 +332,8 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `src-tauri/src/tools/` | Code Interpreter と stdio MCP |
 | `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
 | `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
+| `src-tauri/src/history.rs` | チャット履歴 (AppSync の GraphQL API) |
+| `infra/chat-history.yaml` | チャット履歴の AppSync + DynamoDB (CloudFormation) |
 | `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 | `dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / Langfuse) |
