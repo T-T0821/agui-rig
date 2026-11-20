@@ -4393,6 +4393,7 @@ dependencies = [
  "aws-sdk-sts",
  "axum",
  "base64 0.22.1",
+ "dirs",
  "dotenvy",
  "futures",
  "opentelemetry",
