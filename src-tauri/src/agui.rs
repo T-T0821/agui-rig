@@ -19,16 +19,31 @@ pub struct RunAgentInput {
     /// CopilotKit の `useAgentContext` などで渡される追加コンテキスト。
     #[serde(default)]
     pub context: Vec<ContextItem>,
-    // state / tools / forwardedProps も届くが、このサンプルでは使わない。
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InputMessage {
-    /// "user" | "assistant" | "system" | "developer" | "tool" | "activity" | "reasoning" ...
+    /// "user" | "assistant" | "system" | "developer" | "tool" | ...
     pub role: String,
     /// 文字列、または `{ "type": "text", "text": ... }` などの配列。
     #[serde(default)]
     pub content: Value,
+    /// assistant メッセージのツール呼び出し
+    #[serde(default)]
+    pub tool_calls: Vec<InputToolCall>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InputToolCall {
+    pub function: InputFunction,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InputFunction {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: String,
 }
 
 impl InputMessage {
@@ -53,7 +68,7 @@ pub struct ContextItem {
     pub value: String,
 }
 
-/// フロントへ流す AG-UI イベント (このサンプルで使うものだけ)。
+/// フロントへ流す AG-UI イベント (このアプリで使うものだけ)。
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "type",
@@ -65,6 +80,10 @@ pub enum Event {
     TextMessageStart { message_id: String, role: &'static str },
     TextMessageContent { message_id: String, delta: String },
     TextMessageEnd { message_id: String },
+    ToolCallStart { tool_call_id: String, tool_call_name: String, parent_message_id: String },
+    ToolCallArgs { tool_call_id: String, delta: String },
+    ToolCallEnd { tool_call_id: String },
+    ToolCallResult { message_id: String, tool_call_id: String, content: String, role: &'static str },
     RunFinished { thread_id: String, run_id: String },
     RunError { message: String },
 }

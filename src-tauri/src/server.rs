@@ -4,7 +4,7 @@
 //! フロントの `HttpAgent` (@ag-ui/client) がそのまま接続できる。
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -12,20 +12,20 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use rig_core::DynModel;
-use rig_core::operation::Completion;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 
-use crate::agent;
+use crate::agent::{self, Runtime};
 use crate::agui::{Event, RunAgentInput};
+
+/// ログイン状態に応じて差し替わる実行環境 (未ログインなら None)。
+pub type SharedRuntime = Arc<RwLock<Option<Arc<Runtime>>>>;
 
 #[derive(Clone)]
 pub struct ServerState {
-    /// 起動時に接続したモデル。失敗した場合はエラーメッセージ。
-    pub model: Result<Arc<DynModel<Completion>>, String>,
+    pub runtime: SharedRuntime,
     /// 起動ごとに生成するトークン。同じ PC 上の他のアプリや
     /// ブラウザのページからエンドポイントを叩かれないようにする。
     pub token: String,
@@ -52,26 +52,24 @@ async fn run_agent(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    let runtime = state.runtime.read().unwrap().clone();
     let (tx, rx) = mpsc::unbounded_channel::<Event>();
 
     tokio::spawn(async move {
         let emit = |event: Event| {
             let _ = tx.send(event);
         };
-        match &state.model {
-            Ok(model) => {
-                // クライアントが切断したら (停止ボタンなど) LLM のストリームも止める
+        match runtime {
+            Some(runtime) => {
+                // クライアントが切断したら (停止ボタンなど) 実行も止める
                 tokio::select! {
-                    _ = agent::run(model, input, emit) => {}
+                    _ = agent::run(&runtime, input, emit) => {}
                     _ = tx.closed() => {}
                 }
             }
-            Err(message) => {
-                emit(Event::RunStarted {
-                    thread_id: input.thread_id.clone(),
-                    run_id: input.run_id.clone(),
-                });
-                emit(Event::RunError { message: message.clone() });
+            None => {
+                emit(Event::RunStarted { thread_id: input.thread_id, run_id: input.run_id });
+                emit(Event::RunError { message: "ログインしていません".into() });
             }
         }
     });

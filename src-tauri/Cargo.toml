@@ -1,6 +1,6 @@
 [package]
 name = "rig-agui-chat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [lib]
@@ -12,13 +12,34 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "process"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio-stream = "0.1"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
-rig-core = { version = "0.46", features = ["reqwest"] }
 dotenvy = "0.15"
+
+# LLM (Rig + Bedrock)
+rig-core = { version = "0.46", features = ["reqwest"] }
+rig-bedrock = "0.46"
+
+# AWS (STS の一時認証情報、AgentCore Code Interpreter)
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-sts = "1"
+aws-sdk-bedrockruntime = "1"
+aws-sdk-bedrockagentcore = "1"
+
+# stdio MCP クライアント
+rmcp = { version = "3", features = ["client", "transport-async-rw"] }
+
+# OAuth (PKCE)
+reqwest = { version = "0.13", features = ["json", "form"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+url = "2"
