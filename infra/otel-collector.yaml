@@ -1,0 +1,57 @@
+# OpenTelemetry Collector (contrib) の設定例。EKS 上で Langfuse の前に置く。
+#
+#   アプリ ─(OTLP/HTTP + Authorization: Bearer <ID トークン>)→ この Collector ─(Langfuse のキー)→ Langfuse
+#
+# - アプリからの受信は、共通基盤の ID トークンで認証する (oidc 認証拡張が署名・issuer・audience・期限を確かめる)。
+#   アプリ側は TELEMETRY_AUTH=id_token と OTEL_EXPORTER_OTLP_ENDPOINT=https://<この Collector> を設定する
+# - 利用者 ID (langfuse.user.id) は、アプリが送った値ではなく、検証したトークンの sub で上書きする。
+#   そのため、ほかの人の名前で料金を付けることはできない
+# - Langfuse のキーは環境変数 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY で渡す
+#   (Secrets Manager から External Secrets などで Kubernetes の Secret にする)
+# - アプリからの通信は TLS で受けること (Ingress / ALB で終端するか、下の tls を設定する)。ID トークンが流れるため
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  oidc:
+    issuer_url: https://your-tenant.auth0.com/ # ID トークンの iss と完全に一致させる (Auth0 は末尾に / が付く)
+    audience: your-client-id # Auth0 の Client ID (ID トークンの aud)
+  basicauth/langfuse:
+    client_auth:
+      username: ${env:LANGFUSE_PUBLIC_KEY}
+      password: ${env:LANGFUSE_SECRET_KEY}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        # tls:
+        #   cert_file: /etc/otel/tls/tls.crt
+        #   key_file: /etc/otel/tls/tls.key
+        auth:
+          authenticator: oidc
+
+processors:
+  # 利用者 ID を、検証済みトークンの sub で上書きする (batch より前に置く。batch の後では認証情報が消えるため)
+  attributes/user:
+    actions:
+      - key: langfuse.user.id
+        from_context: auth.subject
+        action: upsert
+  batch: {}
+
+exporters:
+  otlphttp/langfuse:
+    # 末尾に /v1/traces が付いて、Langfuse の /api/public/otel/v1/traces に送られる
+    endpoint: http://langfuse-web.langfuse.svc.cluster.local:3000/api/public/otel
+    auth:
+      authenticator: basicauth/langfuse
+
+service:
+  extensions: [health_check, oidc, basicauth/langfuse]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [attributes/user, batch]
+      exporters: [otlphttp/langfuse]

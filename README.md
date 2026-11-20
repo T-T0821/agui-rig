@@ -54,7 +54,7 @@ flowchart LR
   subgraph PC["利用者の PC"]
     App["Tauri アプリ (Rust)<br/>トークンと一時認証情報はメモリだけ"]
   end
-  IdP["共通基盤 OAuth (OIDC)<br/>Auth0 など"]
+  IdP["共通基盤 OAuth (OIDC)<br/>Auth0"]
   subgraph AWS["AWS アカウント"]
     STS["STS<br/>AssumeRoleWithWebIdentity"]
     IAM["IAM<br/>OIDC プロバイダー + ロール"]
@@ -79,7 +79,8 @@ flowchart LR
   AppSync -- "利用料金 (sub)" --> Usage["Lambda (VPC)"]
   Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
-  App -- "⑥ OTLP/HTTP" --> Collector
+  App -- "⑥ OTLP/HTTP (ID トークン)" --> Collector
+  Collector -. "JWKS で検証" .-> IdP
   Collector --> Langfuse
 ```
 
@@ -93,13 +94,35 @@ flowchart LR
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
 | ⑤ アプリ → AppSync → DynamoDB | ID トークン (AppSync の OpenID Connect 認証) | チャット履歴。リゾルバーが ID トークンの `sub` だけで利用者を分ける |
 | ⑤' アプリ → AppSync → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (今日・今月)。Langfuse のキーは Lambda だけが持つ |
-| ⑥ アプリ → OTel Collector → Langfuse | Collector 側の設定による | トレース、トークン数、料金の内訳 |
+| ⑥ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
 
 - PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
 - 利用の記録は CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額は Cost Explorer で確認します。
 - 履歴を AppSync 経由にしているのは、AppSync が ID トークンを検証して `sub` を取り出すので、利用者を偽れないためです
   (IAM 認証だと、AppSync に見えるのはアプリが付けた STS のセッション名で、なりすましを防ぎにくい)。
   このため、アプリのロールに DynamoDB の権限は要りません。
+- トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
+
+## 共通基盤 (Auth0) の設定
+
+共通基盤は Auth0 です。Auth0 側とこのアプリ側で、次のように合わせます。
+
+| 場所 | 設定 |
+| --- | --- |
+| Auth0 の Application | 種類は **Native**。Grant Types は **Authorization Code** と **Refresh Token**。Refresh Token Rotation を有効にする |
+| Auth0 の Allowed Callback URLs | `http://127.0.0.1:53682/callback` (ポートは下の `OAUTH_REDIRECT_PORT` と同じ値) |
+| アプリ | `OAUTH_ISSUER=https://<テナント>.auth0.com/` (カスタムドメインならその URL)、`OAUTH_CLIENT_ID=<Client ID>`、`OAUTH_REDIRECT_PORT=53682` |
+
+- Auth0 はコールバック URL をポートまで完全一致で確かめるので、`OAUTH_REDIRECT_PORT` の固定が**必須**です (未設定だと空いているポートを使うため、Auth0 に断られます)。
+  そのポートが PC で使われていると、ログインできません。ほかと重なりにくい番号を選んでください
+- リフレッシュトークンは `offline_access` スコープで受け取ります (既定のスコープに入っています)
+- ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 3 か所) は、どれもこの末尾の `/` まで合わせてください
+  - IAM の OIDC プロバイダー: 信頼ポリシーの条件キーも `<テナント>.auth0.com/:aud` と `/` 入りになります
+  - AppSync の `OidcIssuer` (`infra/chat-history.yaml`)
+  - Collector の `issuer_url` (`infra/otel-collector.yaml`)
+- ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
+- 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
+  DynamoDB と Langfuse にはそのまま入ります
 
 ## AWS 側の準備
 
@@ -137,7 +160,7 @@ aws cloudformation deploy \
   --template-file infra/chat-history.yaml \
   --stack-name agui-rig-chat-history \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides OidcIssuer=https://auth.example.com/ OidcClientId=chat-app
+  --parameter-overrides OidcIssuer=https://your-tenant.auth0.com/ OidcClientId=your-client-id
 aws cloudformation describe-stacks --stack-name agui-rig-chat-history \
   --query "Stacks[0].Outputs[?OutputKey=='GraphQLUrl'].OutputValue" --output text
 ```
@@ -162,14 +185,14 @@ npm run dev:mock
 ```
 
 `dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、共通基盤 OAuth、AWS STS、Bedrock、
-AgentCore Code Interpreter、Langfuse をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
+AgentCore Code Interpreter、AppSync、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
 
 - 「ログイン」を押すとブラウザが開き、すぐに「模擬 太郎」でログインした状態になります
 - 何か送ると、模擬の Bedrock が決まった筋書きで MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
   (画面やツール表示の開発向け。回答の中身は意味のあるものではありません)
 - 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
 - 模擬の AppSync がチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
-- 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Langfuse へのトレース送信など) はターミナルに `[mock]` で出ます
+- 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Collector へのトレース送信と ID トークンの利用者など) はターミナルに `[mock]` で出ます
 - 例の MCP サーバー (`examples/time-mcp`) の依存は、初回に自動でインストールします
 
 ### ログインを省略して本物の AWS で試す
@@ -212,6 +235,7 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
+| `TELEMETRY_AUTH` | `id_token` で、OTLP の送信にログイン中の ID トークンを付ける (Collector で検証する。下記) |
 | `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力もトレースに含める (既定は含めない。利用者 ID の `sub` は常に送る) |
 | `RUST_LOG` | ログの詳しさ (既定 `info`) |
 
@@ -227,7 +251,8 @@ Langfuse での見え方:
 - 失敗した実行とツールは ERROR レベルになる
 
 本文 (プロンプト、回答、ツールの入出力) は `TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。
-利用者 ID には ID トークンの `sub` (不透明な ID) を常に送ります。ID トークンや AWS の認証情報は送りません。
+利用者 ID には ID トークンの `sub` (不透明な ID) を常に送ります。AWS の認証情報は送りません。
+ID トークンは、`TELEMETRY_AUTH=id_token` のときに Collector への認証ヘッダーとしてだけ使います (トレースの中身には入れません)。
 
 #### 料金の計測
 
@@ -281,10 +306,22 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 - 「今日」「今月」の区切りは `UtcOffsetMinutes` (既定 540 = 日本時間) です
 - Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
 
-> **配布するときの注意**: Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、
-> 利用者の PC に配るアプリへ直接入れるのは避けてください。本番では、キーを持った
-> OpenTelemetry Collector (社内のゲートウェイ) を立てて、アプリは `OTEL_EXPORTER_OTLP_ENDPOINT` でそこに送る構成にします。
-> `LANGFUSE_*` を直接使うのは開発中だけにしてください。
+#### 本番は Collector 経由で、ID トークンで認証して送る
+
+Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、利用者の PC には置きません。
+`LANGFUSE_*` を直接使うのは開発中だけにして、本番は EKS 上の OpenTelemetry Collector に送ります。
+
+```
+アプリ ─(OTLP/HTTP + Authorization: Bearer <ID トークン>)→ Collector ─(Langfuse のキー)→ Langfuse
+```
+
+- アプリ: `OTEL_EXPORTER_OTLP_ENDPOINT=https://<Collector>` と `TELEMETRY_AUTH=id_token` を設定します (どちらも配布物に埋め込めます)。
+  送るたびに、その時点の ID トークン (自動更新されたもの) を付けます。ログイン前のトレースは送りません
+- Collector: `infra/otel-collector.yaml` が設定例です (otelcol-contrib)。`oidc` 認証拡張で、ID トークンの署名・issuer・audience・期限を確かめます。
+  利用者 ID (`langfuse.user.id`) は、アプリが送った値ではなく検証済みトークンの `sub` で上書きするので、他人の名前で料金を付けることはできません
+- Langfuse のキーは Collector にだけ渡します (Secrets Manager から External Secrets などで)
+- ID トークンが流れるので、Collector は TLS で受けてください。リリースビルドは `TELEMETRY_AUTH=id_token` のとき https 以外の送信先を拒否します
+- `npm run dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます
 
 ### Anthropic API で動作確認する
 
@@ -338,7 +375,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 
 ### 書けるキーと書けないキー
 
-- 書ける: `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE`、`BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`RUST_LOG`
+- 書ける: `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE`、`BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`TELEMETRY_AUTH`、`RUST_LOG`
 - 書けない (秘密情報): `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`OTEL_EXPORTER_OTLP_HEADERS`、`ANTHROPIC_API_KEY`、AWS のアクセスキー
   - ビルド時の設定に入っていると、ビルドが失敗します
   - `config.json` に入っていると、無視して起動ログに書きます
@@ -362,9 +399,10 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
 | `src-tauri/src/history.rs` | チャット履歴 (AppSync の GraphQL API) |
 | `infra/chat-history.yaml` | チャット履歴の AppSync + DynamoDB (CloudFormation) |
+| `infra/otel-collector.yaml` | EKS 上の OpenTelemetry Collector の設定例 (ID トークンで受けて Langfuse へ送る) |
 | `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
-| `dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / Langfuse) |
+| `dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / AppSync / Collector / Langfuse) |
 | `dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
 
 ## 補足

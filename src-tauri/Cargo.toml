@@ -40,7 +40,7 @@ aws-sdk-bedrockagentcore = "1"
 rmcp = { version = "3", features = ["client", "transport-async-rw"] }
 
 # OAuth (PKCE)
-reqwest = { version = "0.13", features = ["json", "form"] }
+reqwest = { version = "0.13", features = ["json", "form", "blocking"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
@@ -53,4 +53,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-opentelemetry = "0.34"
 opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["trace"] }
+opentelemetry-http = "0.33"
+async-trait = "0.1"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }

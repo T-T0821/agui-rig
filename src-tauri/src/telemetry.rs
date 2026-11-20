@@ -8,7 +8,9 @@
 //! 1. `LANGFUSE_PUBLIC_KEY` と `LANGFUSE_SECRET_KEY` があれば Langfuse
 //!    (`LANGFUSE_HOST`、既定 https://cloud.langfuse.com の `/api/public/otel/v1/traces`)
 //! 2. `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` があれば、その OTLP 受け口
-//!    (ヘッダーは `OTEL_EXPORTER_OTLP_HEADERS`。Collector 経由で Langfuse に送るときはこちら)
+//!    (Collector 経由で Langfuse に送るときはこちら)。`TELEMETRY_AUTH=id_token` なら、
+//!    ログイン中の ID トークンを `Authorization: Bearer` で付けて送る (Collector の oidc 認証で検証する)。
+//!    ログイン前のスパンは送らない。リリースビルドでは送信先が https:// のときだけ使える
 //! 3. どちらも無ければ送らない
 //!
 //! プロンプトや回答の本文は、`TELEMETRY_RECORD_CONTENT=true` のときだけ記録する。
@@ -16,11 +18,13 @@
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use base64::Engine;
+use async_trait::async_trait;
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -28,8 +32,35 @@ use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use crate::aws::IdToken;
+
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static RECORD_CONTENT: OnceLock<bool> = OnceLock::new();
+/// トレースの送信に付ける ID トークン (ログイン中だけ)。
+static ID_TOKEN: RwLock<Option<IdToken>> = RwLock::new(None);
+
+/// ログインしたら Some、ログアウトしたら None を渡す。`TELEMETRY_AUTH=id_token` のときに使う。
+/// ID トークンが更新されると、次の送信から新しいトークンが付く。
+pub fn set_id_token(token: Option<IdToken>) {
+    *ID_TOKEN.write().unwrap() = token;
+}
+
+/// 送信のたびに、その時点の ID トークンを付ける HTTP クライアント。
+#[derive(Debug)]
+struct IdTokenClient(reqwest::blocking::Client);
+
+#[async_trait]
+impl HttpClient for IdTokenClient {
+    async fn send_bytes(&self, mut request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
+        let token = ID_TOKEN.read().unwrap().as_ref().map(IdToken::get);
+        let Some(token) = token else {
+            // ログイン前 (またはログアウト後) は Collector が受け付けないので、送らずに捨てる
+            return Ok(Response::builder().status(200).body(Bytes::new())?);
+        };
+        request.headers_mut().insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        self.0.send_bytes(request).await
+    }
+}
 
 /// プロンプト・回答・ツールの入出力をトレースに含めるか。
 pub fn record_content() -> bool {
@@ -56,17 +87,33 @@ fn exporter() -> Result<Option<(SpanExporter, String)>, String> {
         return Ok(Some((exporter, format!("Langfuse ({host})"))));
     }
 
-    if var("OTEL_EXPORTER_OTLP_ENDPOINT").is_some() || var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_some() {
+    if let Some(endpoint) = var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").or_else(|| var("OTEL_EXPORTER_OTLP_ENDPOINT")) {
         // エンドポイントとヘッダーは OTEL_EXPORTER_OTLP_* 環境変数から SDK が読む
-        let exporter = SpanExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpBinary)
-            .build()
-            .map_err(|e| e.to_string())?;
-        return Ok(Some((exporter, "OTLP".into())));
+        let builder = SpanExporter::builder().with_http().with_protocol(Protocol::HttpBinary);
+        let auth = var("TELEMETRY_AUTH");
+        let (builder, target) = match auth.as_deref() {
+            None => (builder, "OTLP".to_string()),
+            Some("id_token") => {
+                if !cfg!(debug_assertions) && !endpoint.starts_with("https://") {
+                    return Err("TELEMETRY_AUTH=id_token では、ID トークンを守るため送信先を https:// にしてください".into());
+                }
+                (builder.with_http_client(IdTokenClient(blocking_client()?)), "OTLP (ID トークンで認証)".to_string())
+            }
+            Some(other) => return Err(format!("TELEMETRY_AUTH={other} は使えません (id_token か、未設定)")),
+        };
+        let exporter = builder.build().map_err(|e| e.to_string())?;
+        return Ok(Some((exporter, target)));
     }
 
     Ok(None)
+}
+
+/// reqwest のブロッキングクライアントは非同期ランタイムの中では作れないので、別スレッドで作る。
+fn blocking_client() -> Result<reqwest::blocking::Client, String> {
+    std::thread::spawn(|| reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build())
+        .join()
+        .map_err(|_| "HTTP クライアントを作れません".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// ログとトレースを初期化する。起動時に 1 回だけ呼ぶ。

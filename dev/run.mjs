@@ -1,5 +1,5 @@
 // 開発用の起動スクリプト。
-//   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / Langfuse を全部そこへ向ける
+//   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / AppSync / Collector を全部そこへ向ける
 //   npm run dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
@@ -34,7 +34,7 @@ function tauriDev(env) {
 }
 
 if (mode === "mock") {
-  const { startMockServer, MOCK_LANGFUSE } = await import("./mock-server.mjs");
+  const { startMockServer } = await import("./mock-server.mjs");
   const { server, base } = await startMockServer();
   const noProxy = ["127.0.0.1", "localhost", process.env.NO_PROXY].filter(Boolean).join(",");
   const child = tauriDev({
@@ -52,9 +52,12 @@ if (mode === "mock") {
     LLM_MODEL: "",
     MCP_CONFIG: exampleMcpConfig(),
     CHAT_API_URL: `${base}/graphql`,
-    LANGFUSE_HOST: base,
-    LANGFUSE_PUBLIC_KEY: MOCK_LANGFUSE.publicKey,
-    LANGFUSE_SECRET_KEY: MOCK_LANGFUSE.secretKey,
+    // トレースは本番と同じく Collector へ、ID トークンで認証して送る (Langfuse のキーはアプリに渡さない)
+    LANGFUSE_PUBLIC_KEY: "",
+    LANGFUSE_SECRET_KEY: "",
+    OTEL_EXPORTER_OTLP_ENDPOINT: "",
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${base}/v1/traces`,
+    TELEMETRY_AUTH: "id_token",
     TELEMETRY_RECORD_CONTENT: "true",
     NO_PROXY: noProxy,
     no_proxy: noProxy,
