@@ -43,3 +43,11 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
 url = "2"
+
+# ログとトレース (OpenTelemetry → Langfuse などの OTLP 受け口)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-opentelemetry = "0.34"
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }

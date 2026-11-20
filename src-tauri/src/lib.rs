@@ -3,6 +3,7 @@ mod agui;
 mod auth;
 mod aws;
 mod server;
+mod telemetry;
 mod tools;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -71,6 +72,7 @@ fn status(state: &AppState) -> AuthStatus {
 
 /// 認証情報からモデルとツールを組み立てる。
 async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Result<Arc<Runtime>, String> {
+    let user = token.as_ref().map(|(_, principal)| principal.clone());
     let config = aws::sdk_config(&state.aws, token).await?;
 
     // 動作確認用: LLM_MODEL (vendor/model 形式、例: anthropic/claude-sonnet-5-5) があれば
@@ -94,7 +96,7 @@ async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Re
         .then(|| Arc::new(CodeInterpreter::new(aws_sdk_bedrockagentcore::Client::new(&config), ci_id)));
 
     let mcp = state.mcp.get_or_init(|| async { Arc::new(McpHub::empty()) }).await.clone();
-    Ok(Arc::new(Runtime { model: Arc::new(model), tools: Tools { code_interpreter, mcp } }))
+    Ok(Arc::new(Runtime { model: Arc::new(model), tools: Tools { code_interpreter, mcp }, user }))
 }
 
 /// 実行環境を差し替える。古い Code Interpreter のセッションは止める。
@@ -121,9 +123,9 @@ async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus,
     let oauth = state.oauth.clone().ok_or("OAuth が設定されていません")?;
     let session = oauth
         .login(|url| {
-            eprintln!("[auth] ブラウザでログインしてください: {url}");
+            tracing::info!("ブラウザでログインしてください: {url}");
             if let Err(e) = app.opener().open_url(url, None::<&str>) {
-                eprintln!("[auth] ブラウザを開けません: {e}");
+                tracing::warn!("ブラウザを開けません: {e}");
             }
         })
         .await?;
@@ -161,7 +163,7 @@ fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
                     *session.lock().unwrap() = Some(next);
                 }
                 Err(e) => {
-                    eprintln!("[auth] トークンを更新できません。再ログインが必要です: {e}");
+                    tracing::warn!("トークンを更新できません。再ログインが必要です: {e}");
                     *session.lock().unwrap() = None;
                     replace_runtime(&runtime, None);
                     let _ = app.emit("auth-changed", ());
@@ -178,6 +180,7 @@ fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
+    telemetry::init();
 
     // AG-UI サーバー: ポートは AGENT_PORT で固定でき、未指定なら空いているポート
     let port: u16 = std::env::var("AGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -220,7 +223,7 @@ pub fn run() {
                 if state.oauth.is_none() {
                     match build_runtime(&state, None).await {
                         Ok(rt) => replace_runtime(&state.runtime, Some(rt)),
-                        Err(e) => eprintln!("[aws] {e}"),
+                        Err(e) => tracing::warn!("{e}"),
                     }
                 }
             });
@@ -231,6 +234,8 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                // ここまでのトレースを送り切る
+                let _ = std::thread::spawn(telemetry::shutdown).join();
                 // MCP サーバーのプロセスと Code Interpreter のセッションを止める (最大 3 秒待つ)
                 if let Some(hub) = app.state::<AppState>().mcp.get() {
                     hub.kill_all();

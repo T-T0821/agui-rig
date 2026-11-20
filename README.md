@@ -89,6 +89,64 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
+| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
+| `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力・利用者 ID もトレースに含める (既定は含めない) |
+| `RUST_LOG` | ログの詳しさ (既定 `info`) |
+
+### トレース (Langfuse)
+
+Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
+アプリはそれを OTLP/HTTP で Langfuse の `/api/public/otel/v1/traces` に送ります。
+
+Langfuse での見え方:
+
+- チャット 1 回 = トレース 1 本。名前は `chat`、セッション = AG-UI のスレッド ID
+- その下に、モデル呼び出し (`chat`、Generation として表示) とツール呼び出し (`execute_tool <ツール名>`) が順に並ぶ
+- 失敗した実行とツールは ERROR レベルになる
+
+本文 (プロンプト、回答、ツールの入出力) と利用者 ID (STS のセッション名と同じメールなど) は、
+`TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。ID トークンや AWS の認証情報は送りません。
+
+#### 料金の計測
+
+モデル呼び出しのスパンには、トークン数を重ならない 4 つの区分に分けて載せています
+(`langfuse.observation.usage_details`)。Langfuse はこれにモデル定義の単価を掛けて、
+呼び出し・トレース・利用者・セッションごとの料金を出します。
+
+| キー | 中身 |
+| --- | --- |
+| `input` | キャッシュを使わなかった入力トークン |
+| `output` | 出力トークン |
+| `cache_read_input_tokens` | キャッシュから読んだ入力トークン |
+| `cache_creation_input_tokens` | キャッシュに書いた入力トークン |
+
+Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfuse 組み込みの単価表に
+一致しないことがあるので、使うモデルごとにモデル定義を 1 件追加します。
+
+1. Langfuse の **Project Settings → Models** で **Add model definition** を押す
+   (トレース画面の Generation に出ているモデル名のバッジからも作れます)
+2. **Model name**: 分かりやすい名前 (例 `bedrock-claude-sonnet-5-5`)
+3. **Match pattern**: アプリが送るモデル ID に一致する正規表現。
+   推論プロファイルの接頭辞 (`global.` / `us.` / `apac.` など) の有無を両方含めておくと安全です
+   ```
+   (?i)^(global\.|us\.|eu\.|apac\.|jp\.)?anthropic\.claude-sonnet-5-5.*$
+   ```
+4. **Prices**: 上の 4 つのキーそれぞれに、1 トークンあたりの USD 単価を入れる
+   (Bedrock の料金ページの「100 万トークンあたり」の金額 ÷ 1,000,000)。
+   キー名は上の表と完全に一致させてください。一致しないキーは料金 0 になります
+5. 保存すると、それ以降に届いたトレースに料金が付きます (過去分には付きません)
+
+注意:
+
+- 単価はリージョンや推論プロファイル (グローバル / リージョン) で変わることがあります。使っているものの単価を入れてください
+- Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。請求額は AWS の Cost Explorer が正です
+- 利用者別に見るには `TELEMETRY_RECORD_CONTENT=true` が必要です (利用者 ID はこのときだけ送るため)
+
+> **配布するときの注意**: Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、
+> 利用者の PC に配るアプリへ直接入れるのは避けてください。本番では、キーを持った
+> OpenTelemetry Collector (社内のゲートウェイ) を立てて、アプリは `OTEL_EXPORTER_OTLP_ENDPOINT` でそこに送る構成にします。
+> `LANGFUSE_*` を直接使うのは開発中だけにしてください。
 
 ### Anthropic API で動作確認する
 
@@ -117,6 +175,7 @@ AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT
 | `src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
 | `src-tauri/src/tools/` | Code Interpreter と stdio MCP |
 | `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
+| `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足
