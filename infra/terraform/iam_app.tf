@@ -1,6 +1,6 @@
 # アプリ (各 PC の Rust) が ID トークンで引き受けるロール。
 # STS の AssumeRoleWithWebIdentity で一時認証情報に替え、Bedrock と AgentCore Code Interpreter を呼ぶ。
-# DynamoDB の権限は持たせない (チャット履歴は AppSync 経由)。
+# DynamoDB の権限は持たせない (チャット履歴は API Gateway 経由)。
 
 locals {
   # IAM の条件キーは issuer から https:// を除いたもの。Auth0 は末尾に / が付くので、キーも "<テナント>.auth0.com/:aud" になる

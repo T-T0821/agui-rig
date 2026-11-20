@@ -1,5 +1,5 @@
 // 開発用の起動スクリプト。
-//   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / AppSync / Collector を全部そこへ向ける
+//   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / API Gateway / Collector を全部そこへ向ける
 //   npm run dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
@@ -51,7 +51,7 @@ if (mode === "mock") {
     CODE_INTERPRETER_ID: "aws.codeinterpreter.v1",
     LLM_MODEL: "",
     MCP_CONFIG: exampleMcpConfig(),
-    CHAT_API_URL: `${base}/graphql`,
+    CHAT_API_URL: `${base}/api`,
     // トレースは本番と同じく Collector へ、ID トークンで認証して送る (Langfuse のキーはアプリに渡さない)
     LANGFUSE_PUBLIC_KEY: "",
     LANGFUSE_SECRET_KEY: "",

@@ -1,34 +1,21 @@
-# 利用料金 (任意): AppSync → Lambda (VPC 内) → Langfuse の集計 API
+# 利用料金 (任意): API Gateway (GET /usage) → Lambda (VPC 内) → Langfuse の集計 API
 # Langfuse のキーは Secrets Manager にあり、この Lambda だけが読む (アプリには渡さない)。
-# Lambda には AppSync が検証した sub だけが渡るので、本人の金額しか返らない。
+# Lambda はオーソライザーが検証した sub の金額だけを返す。作らなければ /usage は 404 になり、アプリは料金を出さない。
 
 locals {
   usage_enabled = var.langfuse_secret_arn != ""
 }
 
-# Lambda のコードは TypeScript (lambda/usage/src/index.ts)。
-# terraform plan の前に `npm --prefix lambda/usage ci && npm --prefix lambda/usage run build` で dist/index.mjs を作る。
 data "archive_file" "usage" {
   count       = local.usage_enabled ? 1 : 0
   type        = "zip"
-  source_file = "${path.module}/lambda/usage/dist/index.mjs"
+  source_file = "${local.backend_dist}/usage.mjs"
   output_path = "${path.module}/.build/usage.zip"
 
   lifecycle {
     precondition {
-      condition     = fileexists("${path.module}/lambda/usage/dist/index.mjs")
-      error_message = "利用料金の Lambda がビルドされていません。先に npm --prefix lambda/usage ci && npm --prefix lambda/usage run build を実行してください。"
-    }
-  }
-}
-
-data "aws_iam_policy_document" "lambda_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
+      condition     = fileexists("${local.backend_dist}/usage.mjs")
+      error_message = "バックエンドの Lambda がビルドされていません。先に npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build を実行してください。"
     }
   }
 }
@@ -64,7 +51,7 @@ resource "aws_lambda_function" "usage" {
   function_name    = "${var.name}-usage"
   description      = "Langfuse から、呼び出した利用者 (sub) の今日と今月の料金を返す"
   runtime          = "nodejs22.x"
-  handler          = "index.handler"
+  handler          = "usage.handler"
   timeout          = 15
   memory_size      = 256
   role             = aws_iam_role.usage_function[0].arn
@@ -95,48 +82,28 @@ resource "aws_lambda_function" "usage" {
   }
 }
 
-resource "aws_iam_role" "usage_datasource" {
+resource "aws_apigatewayv2_integration" "usage" {
+  count                  = local.usage_enabled ? 1 : 0
+  api_id                 = aws_apigatewayv2_api.backend.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.usage[0].invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "usage" {
   count              = local.usage_enabled ? 1 : 0
-  name               = "${var.name}-appsync-usage"
-  assume_role_policy = data.aws_iam_policy_document.appsync_trust.json
+  api_id             = aws_apigatewayv2_api.backend.id
+  route_key          = "GET /usage"
+  target             = "integrations/${aws_apigatewayv2_integration.usage[0].id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.id_token.id
 }
 
-resource "aws_iam_role_policy" "usage_datasource" {
-  count = local.usage_enabled ? 1 : 0
-  name  = "invoke-usage-function"
-  role  = aws_iam_role.usage_datasource[0].id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "lambda:InvokeFunction"
-      Resource = aws_lambda_function.usage[0].arn
-    }]
-  })
-}
-
-resource "aws_appsync_datasource" "usage" {
-  count            = local.usage_enabled ? 1 : 0
-  api_id           = aws_appsync_graphql_api.chat.id
-  name             = "LangfuseUsage"
-  type             = "AWS_LAMBDA"
-  service_role_arn = aws_iam_role.usage_datasource[0].arn
-
-  lambda_config {
-    function_arn = aws_lambda_function.usage[0].arn
-  }
-}
-
-resource "aws_appsync_resolver" "usage" {
-  count       = local.usage_enabled ? 1 : 0
-  api_id      = aws_appsync_graphql_api.chat.id
-  type        = "Query"
-  field       = "usage"
-  data_source = aws_appsync_datasource.usage[0].name
-  code        = file("${path.module}/resolvers/usage.js")
-
-  runtime {
-    name            = "APPSYNC_JS"
-    runtime_version = "1.0.0"
-  }
+resource "aws_lambda_permission" "usage" {
+  count         = local.usage_enabled ? 1 : 0
+  statement_id  = "AllowApiGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.usage[0].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.backend.execution_arn}/*/GET/usage"
 }

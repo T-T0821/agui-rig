@@ -84,7 +84,7 @@ async fn build_runtime(
     token: Option<(IdToken, String)>,
     user_id: Option<String>,
 ) -> Result<Arc<Runtime>, String> {
-    // チャット履歴 (AppSync)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
+    // チャット履歴 (API Gateway)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
     let history = std::env::var("CHAT_API_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())

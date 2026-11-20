@@ -3,9 +3,9 @@ name: terraform
 on:
   push:
     branches: [main]
-    paths: ["infra/terraform/**", ".github/workflows/terraform.yml"]
+    paths: ["infra/terraform/**", "app/backend/**", ".github/workflows/terraform.yml"]
   pull_request:
-    paths: ["infra/terraform/**", ".github/workflows/terraform.yml"]
+    paths: ["infra/terraform/**", "app/backend/**", ".github/workflows/terraform.yml"]
 
 jobs:
   validate:
@@ -28,11 +28,11 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
 
-  usage-lambda:
+  backend:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: infra/terraform/lambda/usage
+        working-directory: app/backend
     steps:
       - uses: actions/checkout@v4
 
@@ -40,10 +40,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: infra/terraform/lambda/usage/package-lock.json
+          cache-dependency-path: app/backend/package-lock.json
 
-      - name: Type check and build
+      - name: Type check, test and build
         run: |
           npm ci
           npm run typecheck
+          npm test
           npm run build
