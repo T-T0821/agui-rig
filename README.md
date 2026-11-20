@@ -44,6 +44,11 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 
 サーバーは置かず、各 PC のアプリ (Rust) が AWS を直接呼びます。AWS の長期キーは PC に置きません。
 
+![agui-rig の AWS 構成図](docs/images/aws-architecture.png)
+
+<details>
+<summary>同じ図の Mermaid 版 (テキストで直すとき用)</summary>
+
 ```mermaid
 flowchart LR
   subgraph PC["利用者の PC"]
@@ -76,6 +81,8 @@ flowchart LR
   App -- "⑥ OTLP/HTTP" --> Collector
   Collector --> Langfuse
 ```
+
+</details>
 
 | 通信 | 認証 | 用途 |
 | --- | --- | --- |
