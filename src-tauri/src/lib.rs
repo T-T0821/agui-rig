@@ -36,8 +36,12 @@ const DEFAULT_CODE_INTERPRETER: &str = "aws.codeinterpreter.v1";
 struct AppState {
     endpoint: AgentEndpoint,
     aws: AwsSettings,
-    /// OAUTH_ISSUER 未設定なら None (ログインなしの開発モード)
+    /// 共通基盤の OAuth。開発モードと設定エラーのときは None
     oauth: Option<Arc<OAuthClient>>,
+    /// ログインなしで、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) を使う開発モード。開発ビルドだけ
+    dev_mode: bool,
+    /// リリースビルドで OAuth の設定が足りないときの理由 (ログイン画面に出す)
+    config_error: Option<String>,
     /// ログイン中のセッション (トークンは Rust 側だけが持つ)
     session: Arc<Mutex<Option<Session>>>,
     /// AG-UI サーバーが使う実行環境 (モデルとツール)
@@ -65,7 +69,7 @@ struct AuthStatus {
 fn status(state: &AppState) -> AuthStatus {
     let session = state.session.lock().unwrap();
     AuthStatus {
-        auth_required: state.oauth.is_some(),
+        auth_required: !state.dev_mode,
         logged_in: session.is_some(),
         user: session.as_ref().map(|s| s.user.clone()),
     }
@@ -78,7 +82,8 @@ async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Re
 
     // 動作確認用: LLM_MODEL (vendor/model 形式、例: anthropic/claude-sonnet-5-5) があれば
     // Bedrock ではなくそのプロバイダーを使う。API キーは ANTHROPIC_API_KEY などから読まれる。
-    let test_model = std::env::var("LLM_MODEL").ok().filter(|s| !s.is_empty());
+    // LLM_MODEL は開発ビルドだけ (配布物では必ず Bedrock を使う)
+    let test_model = std::env::var("LLM_MODEL").ok().filter(|s| cfg!(debug_assertions) && !s.is_empty());
     let model: DynModel<Completion> = match &test_model {
         Some(reference) => Catalog::builtin()
             .connect(reference.as_str())
@@ -91,7 +96,7 @@ async fn build_runtime(state: &AppState, token: Option<(IdToken, String)>) -> Re
 
     // Code Interpreter は AWS のサービス。LLM_MODEL を使い、かつ OAuth も無い (AWS の認証が無いことが多い)
     // ときは、CODE_INTERPRETER_ID を明示しない限り無効にする
-    let ci_default = if test_model.is_some() && state.oauth.is_none() { "off" } else { DEFAULT_CODE_INTERPRETER };
+    let ci_default = if test_model.is_some() && state.dev_mode { "off" } else { DEFAULT_CODE_INTERPRETER };
     let ci_id = std::env::var("CODE_INTERPRETER_ID").unwrap_or_else(|_| ci_default.into());
     let code_interpreter = (ci_id != "off")
         .then(|| Arc::new(CodeInterpreter::new(aws_sdk_bedrockagentcore::Client::new(&config), ci_id)));
@@ -121,7 +126,10 @@ fn auth_status(state: State<'_, AppState>) -> AuthStatus {
 /// 共通基盤の OAuth でログインし、ID トークン → STS の一時認証情報で Bedrock などを使えるようにする。
 #[tauri::command]
 async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus, String> {
-    let oauth = state.oauth.clone().ok_or("OAuth が設定されていません")?;
+    let oauth = state
+        .oauth
+        .clone()
+        .ok_or_else(|| state.config_error.clone().unwrap_or_else(|| "OAuth が設定されていません".into()))?;
     let session = oauth
         .login(|url| {
             tracing::info!("ブラウザでログインしてください: {url}");
@@ -178,6 +186,34 @@ fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
     }
 }
 
+/// ログインの方式。
+struct AuthMode {
+    oauth: Option<OAuthConfig>,
+    dev_mode: bool,
+    error: Option<String>,
+}
+
+impl AuthMode {
+    /// 開発ビルド: `DEV_SKIP_LOGIN=1` か OAUTH_ISSUER 未設定なら開発モード (ログインなし)。
+    /// リリースビルド: 開発モードは無く、https の OAUTH_ISSUER が必須 (模擬サーバーにも向けられない)。
+    fn resolve() -> Self {
+        let config = OAuthConfig::from_env();
+        if cfg!(debug_assertions) {
+            let skip = std::env::var("DEV_SKIP_LOGIN").is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
+            return if skip || config.is_none() {
+                Self { oauth: None, dev_mode: true, error: None }
+            } else {
+                Self { oauth: config, dev_mode: false, error: None }
+            };
+        }
+        match config {
+            Some(c) if c.issuer.starts_with("https://") => Self { oauth: Some(c), dev_mode: false, error: None },
+            Some(_) => Self { oauth: None, dev_mode: false, error: Some("OAUTH_ISSUER は https:// で始まる必要があります".into()) },
+            None => Self { oauth: None, dev_mode: false, error: Some("OAUTH_ISSUER が設定されていません".into()) },
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 設定 (環境変数 / .env、アプリ設定フォルダの config.json、ビルド時の設定) を読む
@@ -196,13 +232,22 @@ pub fn run() {
     let runtime: SharedRuntime = Arc::new(RwLock::new(None));
     let app_router = server::router(server::ServerState { runtime: runtime.clone(), token: token.clone() });
 
+    let auth_mode = AuthMode::resolve();
+    if let Some(e) = &auth_mode.error {
+        tracing::error!("{e}");
+    } else if auth_mode.dev_mode {
+        tracing::warn!("開発モード: ログインせず、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) を使います");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             app.manage(AppState {
                 endpoint: AgentEndpoint { url: format!("http://{addr}/agent"), token },
                 aws: AwsSettings::from_env(),
-                oauth: OAuthConfig::from_env().map(|c| Arc::new(OAuthClient::new(c))),
+                oauth: auth_mode.oauth.map(|c| Arc::new(OAuthClient::new(c))),
+                dev_mode: auth_mode.dev_mode,
+                config_error: auth_mode.error,
                 session: Arc::new(Mutex::new(None)),
                 runtime,
                 mcp: Arc::new(OnceCell::new()),
@@ -225,7 +270,7 @@ pub fn run() {
                 let hub = Arc::new(McpHub::start(mcp_path).await);
                 let _ = state.mcp.set(hub);
                 // OAuth を使わない開発モードでは、AWS SDK 標準の認証ですぐ使えるようにする
-                if state.oauth.is_none() {
+                if state.dev_mode {
                     match build_runtime(&state, None).await {
                         Ok(rt) => replace_runtime(&state.runtime, Some(rt)),
                         Err(e) => tracing::warn!("{e}"),
