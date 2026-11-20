@@ -1,4 +1,4 @@
-// 開発用の模擬サーバー (1 つのポートで全部): 共通基盤 OAuth (OIDC)、AWS STS、Bedrock (ConverseStream)、
+// 開発用の模擬サーバー (1 つのポートで全部): Auth0 (OIDC)、AWS STS、Bedrock (ConverseStream)、
 // AgentCore Code Interpreter、AppSync (チャット履歴)、Langfuse の OTLP 受け口。
 // 本物のサービスなしで、ログイン → ツール呼び出し → 回答 → トレース送信までの流れを試すためのもの。
 //
@@ -61,7 +61,7 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       res.end(JSON.stringify(obj));
     };
 
-    // ---- 共通基盤 OAuth (OIDC) ----
+    // ---- Auth0 (OIDC) ----
     if (url.pathname === "/.well-known/openid-configuration") {
       return json({ issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token` });
     }

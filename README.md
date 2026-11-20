@@ -3,7 +3,7 @@
 React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ (Windows / macOS / Linux) に載せ、エージェントを Rust の Rig で動かすアプリです。
 
 - **モデル**: Amazon Bedrock (Rig の `rig-bedrock`)
-- **認証**: 共通基盤の OAuth (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
+- **認証**: Auth0 (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
 - **ツール**: Amazon Bedrock AgentCore Code Interpreter と、PC 上で起動する stdio MCP サーバー
 - **チャット履歴**: AWS AppSync (OpenID Connect 認証) 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
 - **画面**: shadcn/ui (Tailwind CSS v4) と CopilotKit v2 のチャット。OS の設定に合わせてライト / ダークを切り替える
@@ -41,7 +41,7 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 
 </details>
 
-1. 「ログイン」で OS の既定ブラウザが開き、共通基盤でログインする。リダイレクトは `http://127.0.0.1:<port>/callback` で受ける (RFC 8252、クライアントシークレットなし)。
+1. 「ログイン」で OS の既定ブラウザが開き、Auth0 でログインする。リダイレクトは `http://127.0.0.1:<port>/callback` で受ける (RFC 8252、クライアントシークレットなし)。
 2. Rust が ID トークンを STS に渡して一時認証情報を得る。期限前に SDK が自動で取り直し、ID トークンもリフレッシュトークンで自動更新する。**トークンと認証情報は Rust のメモリ上だけに置き、WebView には渡さない。**
 3. チャットを送ると、Rig がモデルを呼び、モデルがツールを呼べば実行して結果を返す、をツールを呼ばなくなるまで繰り返す (最大 10 回)。その様子は AG-UI のイベント (`TEXT_MESSAGE_*`、`TOOL_CALL_START / ARGS / END / RESULT`) で画面に流れ、ツール呼び出しはカードで表示される。
 
@@ -70,7 +70,7 @@ flowchart LR
   subgraph PC["利用者の PC"]
     App["Tauri アプリ (Rust)<br/>トークンと一時認証情報はメモリだけ"]
   end
-  IdP["共通基盤 OAuth (OIDC)<br/>Auth0"]
+  IdP["Auth0 (OIDC)"]
   subgraph AWS["AWS アカウント"]
     STS["STS<br/>AssumeRoleWithWebIdentity"]
     IAM["IAM<br/>OIDC プロバイダー + ロール"]
@@ -104,7 +104,7 @@ flowchart LR
 
 | 通信 | 認証 | 用途 |
 | --- | --- | --- |
-| ① アプリ → 共通基盤 OAuth | Authorization Code + PKCE (シークレットなし) | ログイン、ID トークンとリフレッシュトークンの取得 |
+| ① アプリ → Auth0 | Authorization Code + PKCE (シークレットなし) | ログイン、ID トークンとリフレッシュトークンの取得 |
 | ② アプリ → STS | ID トークン | ロールの一時認証情報 (最大 1 時間、自動更新) |
 | ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
@@ -119,9 +119,9 @@ flowchart LR
   このため、アプリのロールに DynamoDB の権限は要りません。
 - トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
 
-## 共通基盤 (Auth0) の設定
+## Auth0 の設定
 
-共通基盤は Auth0 です。Auth0 側とこのアプリ側で、次のように合わせます。
+ログインには Auth0 を使います。Auth0 側とこのアプリ側で、次のように合わせます。
 
 | 場所 | 設定 |
 | --- | --- |
@@ -181,7 +181,7 @@ npm install
 npm run dev:mock
 ```
 
-`dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、共通基盤 OAuth、AWS STS、Bedrock、
+`dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、Auth0、AWS STS、Bedrock、
 AgentCore Code Interpreter、AppSync、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
 
 - 「ログイン」を押すとブラウザが開き、すぐに「模擬 太郎」でログインした状態になります
@@ -199,7 +199,7 @@ aws sso login --profile my-dev      # など、ローカルの AWS 認証を用�
 AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run dev:aws
 ```
 
-共通基盤の OAuth を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
+Auth0 を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
 AgentCore Code Interpreter を呼びます。そのプロファイルには、上の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
 `.env` に `AWS_PROFILE` などを書いておいても使われます。
 
@@ -223,7 +223,7 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 
 | 変数 | 内容 |
 | --- | --- |
-| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | 共通基盤の OIDC。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
+| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | Auth0 (OIDC)。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
 | `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`npm run dev:aws` が設定する) |
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
