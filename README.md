@@ -134,60 +134,41 @@ flowchart LR
 - リフレッシュトークンは `offline_access` スコープで受け取ります (既定のスコープに入っています)
 - ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 3 か所) は、どれもこの末尾の `/` まで合わせてください
   - IAM の OIDC プロバイダー: 信頼ポリシーの条件キーも `<テナント>.auth0.com/:aud` と `/` 入りになります
-  - AppSync の `OidcIssuer` (`infra/chat-history.yaml`)
+  - AppSync の issuer (Terraform の `oidc_issuer`。IAM の OIDC プロバイダーも同じ値から作ります)
   - Collector の `issuer_url` (`infra/otel-collector.yaml`)
 - ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
 - 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
   DynamoDB と Langfuse にはそのまま入ります
 
-## AWS 側の準備
+## AWS 側の準備 (Terraform)
 
-1. **IAM の OIDC プロバイダー**: 共通基盤の issuer URL を登録し、audience に OAuth のクライアント ID を入れる。issuer は HTTPS で公開されていて、AWS から JWKS を取得できる必要がある。
-2. **IAM ロール**: 信頼ポリシーで、そのプロバイダーからの `sts:AssumeRoleWithWebIdentity` を許可する (`<issuer>:aud` をクライアント ID で条件付け)。権限は必要なものだけにする。例:
+AWS のリソースは `infra/terraform/` の Terraform で作ります。作るもの:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["bedrock:InvokeModelWithResponseStream", "bedrock:InvokeModel"],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "bedrock-agentcore:StartCodeInterpreterSession",
-        "bedrock-agentcore:InvokeCodeInterpreter",
-        "bedrock-agentcore:StopCodeInterpreterSession"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-`Resource` は、使うモデル (推論プロファイル) と Code Interpreter の ARN に絞るのがおすすめです。CloudTrail には、ロールセッション名として `chat-<email または sub>` が残ります。
-
-3. **チャット履歴 (AppSync + DynamoDB)**: `infra/chat-history.yaml` (CloudFormation) で作ります。
+| リソース | 内容 |
+| --- | --- |
+| IAM の OIDC プロバイダー | Auth0 の issuer を登録 (audience = Client ID)。既にあれば `create_oidc_provider = false` |
+| IAM ロール (アプリ用) | 信頼: Auth0 の ID トークンだけ (`<テナント>.auth0.com/:aud` = Client ID)。権限: Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB の権限は持たない |
+| DynamoDB テーブル | チャット履歴 (`pk` = 利用者の `sub`、`sk` = 会話 ID) |
+| AppSync (GraphQL) | OpenID Connect 認証 (Auth0 の ID トークン)。スキーマは `schema.graphql`、リゾルバーは `resolvers/*.js` |
+| 利用料金の Lambda (任意) | `langfuse_secret_arn` を指定したときだけ作る。コードは `lambda/usage/index.js` |
 
 ```sh
-aws cloudformation deploy \
-  --template-file infra/chat-history.yaml \
-  --stack-name agui-rig-chat-history \
-  --capabilities CAPABILITY_IAM \
-  --parameter-overrides OidcIssuer=https://your-tenant.auth0.com/ OidcClientId=your-client-id
-aws cloudformation describe-stacks --stack-name agui-rig-chat-history \
-  --query "Stacks[0].Outputs[?OutputKey=='GraphQLUrl'].OutputValue" --output text
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id などを入れる
+terraform init
+terraform plan
+terraform apply
+terraform output   # chat_api_url → CHAT_API_URL、app_role_arn → AWS_ROLE_ARN
 ```
 
-出てきた URL をアプリの `CHAT_API_URL` に設定します (未設定なら履歴は保存しません)。
-
-- `OidcIssuer` は ID トークンの `iss` と**完全に一致**させてください (Auth0 は末尾に `/` が付きます)
-- テーブルは `pk` = 利用者の `sub`、`sk` = 会話 ID。会話 1 件を 1 項目にし、メッセージは gzip + base64 で 1 つの属性に入れます。
+- state の置き場所 (S3 など) は、チームの方針に合わせて `backend` を足してください (今はローカル)
+- `oidc_issuer` は ID トークンの `iss` と**完全に一致**させてください (Auth0 は末尾に `/` が付きます)
+- 呼べるモデルは `bedrock_model_arns` で絞るのがおすすめです (未指定なら全モデル)。CloudTrail には、ロールセッション名として `chat-<email または sub>` が残ります
+- テーブルは会話 1 件を 1 項目にし、メッセージは gzip + base64 で 1 つの属性に入れます。
   上限 (400KB) を超えそうなときは、長いツールの出力を切り詰め、それでも大きければ古いメッセージから落とします
 - 一覧は 1 人あたり新しい順に最大 200 件です
 - リゾルバーは `ctx.identity.sub` 以外の利用者を指定できないので、他人の会話には届きません
+- `chat_api_url` を設定しなければ、履歴は保存しません
 
 ## 動かし方
 
@@ -219,7 +200,7 @@ AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run dev:aws
 ```
 
 共通基盤の OAuth を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
-AgentCore Code Interpreter を呼びます。そのプロファイルには、下の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
+AgentCore Code Interpreter を呼びます。そのプロファイルには、上の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
 `.env` に `AWS_PROFILE` などを書いておいても使われます。
 
 `dev:mock` も `dev:aws` も開発ビルド専用です。リリースビルドでは、
@@ -315,11 +296,11 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 ```
 
 - Langfuse のキーはプロジェクト全体を読めるので、PC には置かず Lambda だけが持ちます。Lambda は呼び出した本人の `sub` の金額だけを返します
-- `infra/chat-history.yaml` に `LangfuseSecretArn`、`LangfuseHost` (Lambda から届く Langfuse の URL)、
-  `LambdaSubnetIds`、`LambdaSecurityGroupIds` を渡すと作られます (空なら作らず、画面にも出ません)。
+- Terraform に `langfuse_secret_arn`、`langfuse_host` (Lambda から届く Langfuse の URL)、
+  `lambda_subnet_ids`、`lambda_security_group_ids` を渡すと作られます (空なら作らず、画面にも出ません)。
   シークレットの中身は `{"publicKey": "pk-lf-...", "secretKey": "sk-lf-..."}` です
 - Lambda のサブネットからは、EKS 上の Langfuse と Secrets Manager (VPC エンドポイントか NAT) に届く必要があります
-- 「今日」「今月」の区切りは `UtcOffsetMinutes` (既定 540 = 日本時間) です
+- 「今日」「今月」の区切りは `utc_offset_minutes` (既定 540 = 日本時間) です
 - Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
 
 #### 本番は Collector 経由で、ID トークンで認証して送る
@@ -415,7 +396,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
 | `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
 | `src-tauri/src/history.rs` | チャット履歴 (AppSync の GraphQL API) |
-| `infra/chat-history.yaml` | チャット履歴の AppSync + DynamoDB (CloudFormation) |
+| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、AppSync、DynamoDB、利用料金の Lambda) |
 | `infra/otel-collector.yaml` | EKS 上の OpenTelemetry Collector の設定例 (ID トークンで受けて Langfuse へ送る) |
 | `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
