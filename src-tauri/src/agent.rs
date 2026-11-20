@@ -5,13 +5,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use tracing::{Instrument, field::Empty};
 use rig_core::DynModel;
 use rig_core::completion::message::{AssistantContent, AssistantMessage, ToolResultContent};
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, PartKind, StreamEvent};
+use rig_core::telemetry::{self as telemetry_content, completion_parent_span};
 
 use crate::agui::{Event, RunAgentInput};
+use crate::telemetry;
 use crate::tools::Tools;
 
 const SYSTEM_PROMPT: &str = "あなたは親切なアシスタントです。日本語で簡潔に答えてください。\
@@ -25,6 +28,8 @@ const MAX_STEPS: usize = 10;
 pub struct Runtime {
     pub model: Arc<DynModel<Completion>>,
     pub tools: Tools,
+    /// トレースに載せる利用者 (STS のセッション名と同じ、メールなど)。開発モードでは None
+    pub user: Option<String>,
 }
 
 /// AG-UI のメッセージ履歴を Rig のメッセージに変換する。
@@ -81,15 +86,47 @@ fn preamble(input: &RunAgentInput) -> String {
 }
 
 /// 1 回分の実行。イベントは `emit` で順に送る。
+/// トレースでは、この 1 回が Langfuse のトレース 1 本 (セッション = AG-UI のスレッド) になり、
+/// その下に Rig のモデル呼び出しとツール呼び出しが並ぶ。
 pub async fn run(runtime: &Runtime, input: RunAgentInput, emit: impl Fn(Event)) {
+    let content = telemetry::record_content();
+    let span = tracing::info_span!(
+        "chat",
+        langfuse.trace.name = "chat",
+        langfuse.observation.type = "agent",
+        langfuse.session.id = %input.thread_id,
+        langfuse.user.id = runtime.user.as_deref().filter(|_| content),
+        agui.run_id = %input.run_id,
+        langfuse.trace.input = Empty,
+        langfuse.trace.output = Empty,
+        langfuse.observation.level = Empty,
+        langfuse.observation.status_message = Empty,
+        otel.status_code = Empty,
+    );
+    if content && let Some(m) = input.messages.iter().rev().find(|m| m.role == "user") {
+        span.record("langfuse.trace.input", m.text());
+    }
+
     emit(Event::RunStarted { thread_id: input.thread_id.clone(), run_id: input.run_id.clone() });
-    match run_loop(runtime, &input, &emit).await {
-        Ok(()) => emit(Event::RunFinished { thread_id: input.thread_id, run_id: input.run_id }),
-        Err(message) => emit(Event::RunError { message }),
+    match run_loop(runtime, &input, &emit).instrument(span.clone()).await {
+        Ok(answer) => {
+            if content {
+                span.record("langfuse.trace.output", answer);
+            }
+            emit(Event::RunFinished { thread_id: input.thread_id, run_id: input.run_id });
+        }
+        Err(message) => {
+            span.record("langfuse.observation.level", "ERROR");
+            span.record("langfuse.observation.status_message", message.as_str());
+            span.record("otel.status_code", "ERROR");
+            span.in_scope(|| tracing::warn!("実行に失敗しました: {message}"));
+            emit(Event::RunError { message });
+        }
     }
 }
 
-async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event)) -> Result<(), String> {
+/// 成功したら最後の回答テキストを返す (トレース用)。
+async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event)) -> Result<String, String> {
     let mut history = to_history(input);
     if !matches!(history.last(), Some(Message::User { .. })) {
         return Err("送信するメッセージがありません".into());
@@ -101,15 +138,29 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
         let prompt = history.last().cloned().unwrap();
         let mut request = CompletionRequest::new(prompt)
             .messages(history[..history.len() - 1].iter().cloned())
-            .preamble(preamble.clone());
+            .preamble(preamble.clone())
+            .record_content_telemetry(telemetry::record_content());
         request.tools = tool_defs.clone();
 
-        let mut stream = runtime.model.stream(request).map_err(|e| e.to_string())?;
+        // モデル呼び出し 1 回分のスパン。Rig がこのスパンを採用して、モデル名やトークン数を書き込む。
+        // ストリームを直接使う場合、入出力の本文は Rig が記録しないので、ここで記録する。
+        let content = telemetry::record_content();
+        let system = telemetry_content::system_instructions_json(Some(&preamble), content);
+        let generation = completion_parent_span!(
+            target: "rig_agui_chat_lib::agent",
+            name: "chat",
+            operation: "chat",
+            system_instructions: system.as_deref(),
+        );
+        telemetry_content::record_model_input(&generation, &history, content);
+
+        let mut stream = generation.in_scope(|| runtime.model.stream(request).map_err(|e| e.to_string()))?;
 
         // パート (テキスト / ツール呼び出し) ごとに AG-UI の ID を振る
         let message_id = uuid::Uuid::new_v4().to_string();
         let mut text_open = HashMap::new();
         let mut tool_ids = HashMap::new();
+        let mut answer = String::new();
 
         while let Some(item) = stream.next().await {
             let Item::Event(event) = item.map_err(|e| e.to_string())? else { continue };
@@ -132,6 +183,7 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
                     if text_open.insert(part, ()).is_none() {
                         emit(Event::TextMessageStart { message_id: message_id.clone(), role: "assistant" });
                     }
+                    answer.push_str(&text);
                     emit(Event::TextMessageContent { message_id: message_id.clone(), delta: text });
                 }
                 StreamEvent::End { part, .. } => {
@@ -145,7 +197,9 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
             }
         }
 
-        let response = stream.finish().await.map_err(|e| e.to_string())?;
+        let response = stream.finish().instrument(generation.clone()).await.map_err(|e| e.to_string())?;
+        telemetry_content::record_model_output(&generation, &response.choice, content);
+        drop(generation);
         let calls: Vec<_> = response
             .choice
             .iter()
@@ -156,7 +210,7 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
             })
             .collect();
         if calls.is_empty() {
-            return Ok(());
+            return Ok(answer);
         }
 
         // ツールを実行して結果を履歴に足し、もう一度モデルを呼ぶ
@@ -164,10 +218,7 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
         let mut results = Vec::new();
         for (index, call) in calls {
             let name = call.function.name.to_string();
-            let output = match runtime.tools.call(&input.thread_id, &name, &call.function.arguments).await {
-                Ok(out) => out,
-                Err(e) => format!("エラー: {e}"),
-            };
+            let output = call_tool(runtime, &input.thread_id, &name, &call.id.to_string(), &call.function.arguments).await;
             let ag_id = tool_ids
                 .iter()
                 .find(|(part, _)| part.index() == index)
@@ -184,4 +235,41 @@ async fn run_loop(runtime: &Runtime, input: &RunAgentInput, emit: &impl Fn(Event
         history.push(Message::tool_results(results));
     }
     Err(format!("ツールの呼び出しが {MAX_STEPS} 回を超えたので止めました"))
+}
+
+/// ツールを 1 つ実行する。失敗はエラー文としてモデルに返す。
+/// トレースには GenAI 規約の execute_tool スパンとして載る (Langfuse ではツールとして表示)。
+async fn call_tool(runtime: &Runtime, thread_id: &str, name: &str, call_id: &str, args: &serde_json::Map<String, serde_json::Value>) -> String {
+    let content = telemetry::record_content();
+    let span = tracing::info_span!(
+        "execute_tool",
+        otel.name = format!("execute_tool {name}"),
+        gen_ai.operation.name = "execute_tool",
+        gen_ai.tool.name = name,
+        gen_ai.tool.call.id = call_id,
+        langfuse.observation.type = "tool",
+        langfuse.observation.input = Empty,
+        langfuse.observation.output = Empty,
+        langfuse.observation.level = Empty,
+        langfuse.observation.status_message = Empty,
+        otel.status_code = Empty,
+    );
+    if content {
+        span.record("langfuse.observation.input", serde_json::Value::Object(args.clone()).to_string());
+    }
+    let result = runtime.tools.call(thread_id, name, args).instrument(span.clone()).await;
+    let output = match result {
+        Ok(out) => out,
+        Err(e) => {
+            span.record("langfuse.observation.level", "ERROR");
+            span.record("langfuse.observation.status_message", e.as_str());
+            span.record("otel.status_code", "ERROR");
+            span.in_scope(|| tracing::warn!("ツール {name} が失敗しました: {e}"));
+            format!("エラー: {e}")
+        }
+    };
+    if content {
+        span.record("langfuse.observation.output", output.as_str());
+    }
+    output
 }

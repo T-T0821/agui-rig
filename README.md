@@ -89,6 +89,29 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
+| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
+| `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力・利用者 ID もトレースに含める (既定は含めない) |
+| `RUST_LOG` | ログの詳しさ (既定 `info`) |
+
+### トレース (Langfuse)
+
+Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
+アプリはそれを OTLP/HTTP で Langfuse の `/api/public/otel/v1/traces` に送ります。
+
+Langfuse での見え方:
+
+- チャット 1 回 = トレース 1 本。名前は `chat`、セッション = AG-UI のスレッド ID
+- その下に、モデル呼び出し (`chat`、Generation として表示) とツール呼び出し (`execute_tool <ツール名>`) が順に並ぶ
+- 失敗した実行とツールは ERROR レベルになる
+
+本文 (プロンプト、回答、ツールの入出力) と利用者 ID (STS のセッション名と同じメールなど) は、
+`TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。ID トークンや AWS の認証情報は送りません。
+
+> **配布するときの注意**: Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、
+> 利用者の PC に配るアプリへ直接入れるのは避けてください。本番では、キーを持った
+> OpenTelemetry Collector (社内のゲートウェイ) を立てて、アプリは `OTEL_EXPORTER_OTLP_ENDPOINT` でそこに送る構成にします。
+> `LANGFUSE_*` を直接使うのは開発中だけにしてください。
 
 ### Anthropic API で動作確認する
 
@@ -117,6 +140,7 @@ AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT
 | `src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
 | `src-tauri/src/tools/` | Code Interpreter と stdio MCP |
 | `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
+| `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足

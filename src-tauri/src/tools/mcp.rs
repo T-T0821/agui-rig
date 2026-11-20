@@ -64,12 +64,12 @@ impl McpHub {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[mcp] {} を読めません: {e}", path.display());
+                    tracing::warn!("MCP の設定 {} を読めません: {e}", path.display());
                     return hub;
                 }
             },
             Err(_) => {
-                eprintln!("[mcp] 設定ファイルがありません: {}", path.display());
+                tracing::info!("MCP の設定ファイルがありません: {}", path.display());
                 return hub;
             }
         };
@@ -90,13 +90,13 @@ impl McpHub {
                         hub.clients.insert(name, client);
                         hub.children.lock().unwrap().push(child);
                     }
-                    Err(e) => eprintln!("[mcp] {name} のツール一覧を取得できません: {e}"),
+                    Err(e) => tracing::warn!("MCP サーバー {name} のツール一覧を取得できません: {e}"),
                 },
-                Err(e) => eprintln!("[mcp] {name} を起動できません: {e}"),
+                Err(e) => tracing::warn!("MCP サーバー {name} を起動できません: {e}"),
             }
         }
-        eprintln!(
-            "[mcp] ツール: {}",
+        tracing::info!(
+            "MCP のツール: {}",
             hub.tools.iter().map(|t| t.exposed_name.as_str()).collect::<Vec<_>>().join(", ")
         );
         hub
