@@ -1,6 +1,6 @@
 output "chat_api_url" {
-  description = "アプリの CHAT_API_URL に設定する"
-  value       = aws_appsync_graphql_api.chat.uris["GRAPHQL"]
+  description = "アプリの CHAT_API_URL に設定する (API Gateway の URL)"
+  value       = aws_apigatewayv2_api.backend.api_endpoint
 }
 
 output "app_role_arn" {

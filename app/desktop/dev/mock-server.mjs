@@ -1,5 +1,5 @@
 // 開発用の模擬サーバー (1 つのポートで全部): Auth0 (OIDC)、AWS STS、Bedrock (ConverseStream)、
-// AgentCore Code Interpreter、AppSync (チャット履歴)、Langfuse の OTLP 受け口。
+// AgentCore Code Interpreter、バックエンド (API Gateway: チャット履歴・利用料金)、Langfuse の OTLP 受け口。
 // 本物のサービスなしで、ログイン → ツール呼び出し → 回答 → トレース送信までの流れを試すためのもの。
 //
 // 単体で起動: node dev/mock-server.mjs   (既定 http://127.0.0.1:9100、MOCK_PORT で変更)
@@ -171,45 +171,56 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       return res.end();
     }
 
-    // ---- AppSync (チャット履歴の GraphQL API。OpenID Connect 認証) ----
-    if (url.pathname === "/graphql") {
-      // 本物の AppSync と同じく、ID トークンの sub で利用者を分ける (模擬なので署名は検証しない)
+    // ---- バックエンド (API Gateway の HTTP API + JWT オーソライザー → Lambda) ----
+    // CHAT_API_URL = <base>/api。本物と同じく ID トークンの sub で利用者を分ける (模擬なので署名は検証しない)
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      const send = (status, body) => {
+        res.writeHead(status, body === undefined ? {} : { "content-type": "application/json" });
+        return res.end(body === undefined ? undefined : JSON.stringify(body));
+      };
       let sub;
       try {
-        sub = JSON.parse(Buffer.from((req.headers.authorization ?? "").split(".")[1], "base64url").toString()).sub;
+        const [scheme, token] = (req.headers.authorization ?? "").split(" ");
+        if (scheme === "Bearer") sub = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).sub;
       } catch {}
-      if (!sub) {
-        res.writeHead(401, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ errors: [{ errorType: "UnauthorizedException", message: "Valid authorization header not provided." }] }));
-      }
-      const { query, variables = {} } = JSON.parse(text);
+      if (!sub) return send(401, { message: "Unauthorized" });
       const mine = threads.get(sub) ?? new Map();
       threads.set(sub, mine);
-      let data;
-      if (query.includes("saveThread")) {
-        const prev = mine.get(variables.id);
-        const now = new Date().toISOString();
-        mine.set(variables.id, { id: variables.id, title: variables.title, messagesGz: variables.messagesGz, updatedAt: now, createdAt: prev?.createdAt ?? now });
-        data = { saveThread: { id: variables.id } };
-        log("AppSync: saveThread", variables.id.slice(0, 8), `「${variables.title}」`, `${variables.messagesGz.length} 文字`);
-      } else if (query.includes("deleteThread")) {
-        data = { deleteThread: mine.delete(variables.id) || true };
-        log("AppSync: deleteThread", variables.id.slice(0, 8));
-      } else if (query.includes("usage")) {
-        const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
-        data = { usage: { todayUsd: mockCostUsd, monthUsd: mockCostUsd + 1.234, monthStart } };
-        log("AppSync: usage", `今日 $${mockCostUsd.toFixed(4)}`);
-      } else if (query.includes("threads")) {
-        data = { threads: [...mine.values()].map(({ id, title, updatedAt }) => ({ id, title, updatedAt })) };
-        log("AppSync: threads", data.threads.length, "件");
-      } else if (query.includes("thread(")) {
-        const t = mine.get(variables.id);
-        data = { thread: t ? { messagesGz: t.messagesGz } : null };
-        log("AppSync: thread", variables.id.slice(0, 8), t ? "" : "(なし)");
-      } else {
-        data = null;
+      const path = url.pathname.slice("/api".length);
+      const route = `${req.method} ${path.replace(/^\/threads\/[^/]+$/, "/threads/{id}")}`;
+      const id = decodeURIComponent(path.split("/")[2] ?? "");
+      switch (route) {
+        case "GET /threads": {
+          const list = [...mine.values()].map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
+          log("API: GET /threads", list.length, "件");
+          return send(200, list);
+        }
+        case "GET /threads/{id}": {
+          const t = mine.get(id);
+          log("API: GET /threads/{id}", id.slice(0, 8), t ? "" : "(なし)");
+          return t ? send(200, t) : send(404, { message: "会話がありません" });
+        }
+        case "PUT /threads/{id}": {
+          const { title, messagesGz } = JSON.parse(text);
+          if (typeof title !== "string" || typeof messagesGz !== "string") return send(400, { message: "本文が不正です" });
+          const prev = mine.get(id);
+          const now = new Date().toISOString();
+          mine.set(id, { id, title, messagesGz, updatedAt: now, createdAt: prev?.createdAt ?? now });
+          log("API: PUT /threads/{id}", id.slice(0, 8), `「${title}」`, `${messagesGz.length} 文字`);
+          return send(200, { id, title, updatedAt: now });
+        }
+        case "DELETE /threads/{id}":
+          mine.delete(id);
+          log("API: DELETE /threads/{id}", id.slice(0, 8));
+          return send(204);
+        case "GET /usage": {
+          const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
+          log("API: GET /usage", `今日 $${mockCostUsd.toFixed(4)}`);
+          return send(200, { todayUsd: mockCostUsd, monthUsd: mockCostUsd + 1.234, monthStart });
+        }
+        default:
+          return send(404, { message: "Not Found" });
       }
-      return json({ data });
     }
 
     // ---- OTel Collector (OTLP/HTTP の受け口、ID トークンで認証) ----

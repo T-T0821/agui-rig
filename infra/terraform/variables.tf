@@ -86,3 +86,17 @@ variable "utc_offset_minutes" {
   type        = number
   default     = 540
 }
+
+# ---- API Gateway ----
+
+variable "api_throttle_rate" {
+  description = "API Gateway の 1 秒あたりのリクエスト数の上限 (全利用者の合計)"
+  type        = number
+  default     = 50
+}
+
+variable "api_throttle_burst" {
+  description = "API Gateway の同時リクエスト数の上限"
+  type        = number
+  default     = 100
+}

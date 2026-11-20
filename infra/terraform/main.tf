@@ -1,5 +1,11 @@
-# チャット履歴: アプリ ─(ID トークン)→ AppSync (OpenID Connect 認証) → DynamoDB
-# リゾルバーは AppSync が検証した ID トークンの sub (ctx.identity.sub) だけで利用者を分ける。
+# バックエンド: アプリ ─(ID トークン)→ API Gateway (HTTP API + JWT オーソライザー) → Lambda → DynamoDB
+# Lambda のコードは app/backend (TypeScript)。terraform plan の前にビルドする:
+#   npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build
+# Lambda はオーソライザーが検証した ID トークンの sub だけで利用者を分ける。
+
+locals {
+  backend_dist = "${path.module}/../../app/backend/dist"
+}
 
 # pk = 利用者の sub、sk = 会話 ID。会話 1 件 = 1 項目 (メッセージは gzip + base64 で 1 属性に)
 resource "aws_dynamodb_table" "history" {
@@ -27,38 +33,77 @@ resource "aws_dynamodb_table" "history" {
   }
 }
 
-resource "aws_appsync_graphql_api" "chat" {
-  name                = "${var.name}-chat-history"
-  authentication_type = "OPENID_CONNECT"
-  schema              = file("${path.module}/schema.graphql")
+# ---- API Gateway ----
 
-  openid_connect_config {
-    issuer    = var.oidc_issuer
-    client_id = var.oidc_client_id
-    auth_ttl  = 3600000
-    iat_ttl   = 3600000
+resource "aws_apigatewayv2_api" "backend" {
+  name          = "${var.name}-backend"
+  protocol_type = "HTTP"
+  description   = "agui-rig のバックエンド (チャット履歴・利用料金)"
+}
+
+# Auth0 の ID トークンを検証する (署名・iss・aud・有効期限)。Lambda には検証済みのクレームが渡る
+resource "aws_apigatewayv2_authorizer" "id_token" {
+  api_id           = aws_apigatewayv2_api.backend.id
+  name             = "auth0-id-token"
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+
+  jwt_configuration {
+    issuer   = var.oidc_issuer
+    audience = [var.oidc_client_id]
   }
 }
 
-data "aws_iam_policy_document" "appsync_trust" {
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.backend.id
+  name        = "$default"
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_rate_limit  = var.api_throttle_rate
+    throttling_burst_limit = var.api_throttle_burst
+  }
+}
+
+data "aws_iam_policy_document" "lambda_trust" {
   statement {
     actions = ["sts:AssumeRole"]
 
     principals {
       type        = "Service"
-      identifiers = ["appsync.amazonaws.com"]
+      identifiers = ["lambda.amazonaws.com"]
     }
   }
 }
 
-resource "aws_iam_role" "history_datasource" {
-  name               = "${var.name}-appsync-history"
-  assume_role_policy = data.aws_iam_policy_document.appsync_trust.json
+# ---- チャット履歴の Lambda ----
+
+data "archive_file" "history" {
+  type        = "zip"
+  source_file = "${local.backend_dist}/history.mjs"
+  output_path = "${path.module}/.build/history.zip"
+
+  lifecycle {
+    precondition {
+      condition     = fileexists("${local.backend_dist}/history.mjs")
+      error_message = "バックエンドの Lambda がビルドされていません。先に npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build を実行してください。"
+    }
+  }
 }
 
-resource "aws_iam_role_policy" "history_datasource" {
+resource "aws_iam_role" "history_function" {
+  name               = "${var.name}-history-function"
+  assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
+}
+
+resource "aws_iam_role_policy_attachment" "history_function_logs" {
+  role       = aws_iam_role.history_function.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "history_function_table" {
   name = "chat-history-table"
-  role = aws_iam_role.history_datasource.id
+  role = aws_iam_role.history_function.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -69,38 +114,44 @@ resource "aws_iam_role_policy" "history_datasource" {
   })
 }
 
-resource "aws_appsync_datasource" "history" {
-  api_id           = aws_appsync_graphql_api.chat.id
-  name             = "ChatHistoryTable"
-  type             = "AMAZON_DYNAMODB"
-  service_role_arn = aws_iam_role.history_datasource.arn
+resource "aws_lambda_function" "history" {
+  function_name    = "${var.name}-history"
+  description      = "チャット履歴 (呼び出した利用者 sub の会話だけを読み書きする)"
+  runtime          = "nodejs22.x"
+  handler          = "history.handler"
+  timeout          = 10
+  memory_size      = 256
+  role             = aws_iam_role.history_function.arn
+  filename         = data.archive_file.history.output_path
+  source_code_hash = data.archive_file.history.output_base64sha256
 
-  dynamodb_config {
-    table_name = aws_dynamodb_table.history.name
-    region     = var.region
+  environment {
+    variables = {
+      TABLE_NAME = aws_dynamodb_table.history.name
+    }
   }
 }
 
-# 引数で利用者を指定する方法は無いので、他人の会話には届かない
-locals {
-  history_resolvers = {
-    threads       = { type = "Query", field = "threads" }
-    thread        = { type = "Query", field = "thread" }
-    save_thread   = { type = "Mutation", field = "saveThread" }
-    delete_thread = { type = "Mutation", field = "deleteThread" }
-  }
+resource "aws_apigatewayv2_integration" "history" {
+  api_id                 = aws_apigatewayv2_api.backend.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.history.invoke_arn
+  payload_format_version = "2.0"
 }
 
-resource "aws_appsync_resolver" "history" {
-  for_each    = local.history_resolvers
-  api_id      = aws_appsync_graphql_api.chat.id
-  type        = each.value.type
-  field       = each.value.field
-  data_source = aws_appsync_datasource.history.name
-  code        = file("${path.module}/resolvers/${each.key}.js")
+resource "aws_apigatewayv2_route" "history" {
+  for_each           = toset(["GET /threads", "GET /threads/{id}", "PUT /threads/{id}", "DELETE /threads/{id}"])
+  api_id             = aws_apigatewayv2_api.backend.id
+  route_key          = each.value
+  target             = "integrations/${aws_apigatewayv2_integration.history.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.id_token.id
+}
 
-  runtime {
-    name            = "APPSYNC_JS"
-    runtime_version = "1.0.0"
-  }
+resource "aws_lambda_permission" "history" {
+  statement_id  = "AllowApiGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.history.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.backend.execution_arn}/*/*/threads*"
 }

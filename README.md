@@ -5,9 +5,24 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 - **モデル**: Amazon Bedrock (Rig の `rig-bedrock`)
 - **認証**: Auth0 (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
 - **ツール**: Amazon Bedrock AgentCore Code Interpreter と、PC 上で起動する stdio MCP サーバー
-- **チャット履歴**: AWS AppSync (OpenID Connect 認証) 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
+- **チャット履歴**: API Gateway (HTTP API + JWT オーソライザー) → Lambda 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
 - **画面**: shadcn/ui (Tailwind CSS v4) と CopilotKit v2 のチャット。OS の設定に合わせてライト / ダークを切り替える
 - **画面との接続**: AG-UI プロトコル。フロントは `@ag-ui/client` の `HttpAgent` で Rust の AG-UI エンドポイントに直接つなぐ (CopilotKit の Node ランタイムは使わない)
+
+## フォルダ構成
+
+```
+app/
+  desktop/        デスクトップアプリ (Tauri)。npm のコマンドはここで実行する
+    src/          画面 (React + CopilotKit + shadcn/ui)
+    src-tauri/    Rust (Rig のエージェント、ログイン、AWS の呼び出し)
+    dev/          模擬サーバーと開発用の起動スクリプト
+  backend/        API Gateway から呼ばれる Lambda (TypeScript): チャット履歴と利用料金
+infra/
+  terraform/      AWS のリソース (IAM、API Gateway、Lambda、DynamoDB)
+  otel-collector.yaml
+docs/images/      README の図
+```
 
 ## 構成
 
@@ -76,7 +91,8 @@ flowchart LR
     IAM["IAM<br/>OIDC プロバイダー + ロール"]
     Bedrock["Bedrock Runtime<br/>ConverseStream"]
     CI["AgentCore<br/>Code Interpreter"]
-    AppSync["AppSync<br/>GraphQL (OIDC 認証)"]
+    APIGW["API Gateway<br/>HTTP API (JWT オーソライザー)"]
+    History["Lambda<br/>チャット履歴"]
     DDB[("DynamoDB<br/>チャット履歴")]
     subgraph EKS["EKS"]
       Collector["OTel Collector"]
@@ -89,10 +105,11 @@ flowchart LR
   STS -. "JWKS で検証" .-> IdP
   App -- "③ SigV4 (一時認証情報)" --> Bedrock
   App -- "④ SigV4" --> CI
-  App -- "⑤ ID トークン" --> AppSync
-  AppSync -. "JWKS で検証" .-> IdP
-  AppSync -- "sub ごとに読み書き" --> DDB
-  AppSync -- "利用料金 (sub)" --> Usage["Lambda (VPC)"]
+  App -- "⑤ ID トークン" --> APIGW
+  APIGW -. "JWKS で検証" .-> IdP
+  APIGW -- "/threads (sub)" --> History
+  History -- "sub ごとに読み書き" --> DDB
+  APIGW -- "/usage (sub)" --> Usage["Lambda (VPC)<br/>利用料金"]
   Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
   App -- "⑥ OTLP/HTTP (ID トークン)" --> Collector
@@ -108,14 +125,14 @@ flowchart LR
 | ② アプリ → STS | ID トークン | ロールの一時認証情報 (最大 1 時間、自動更新) |
 | ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
-| ⑤ アプリ → AppSync → DynamoDB | ID トークン (AppSync の OpenID Connect 認証) | チャット履歴。リゾルバーが ID トークンの `sub` だけで利用者を分ける |
-| ⑤' アプリ → AppSync → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (今日・今月)。Langfuse のキーは Lambda だけが持つ |
+| ⑤ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (API Gateway の JWT オーソライザー) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
+| ⑤' アプリ → API Gateway → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月)。Langfuse のキーは Lambda だけが持つ |
 | ⑥ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
 
 - PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
 - 利用の記録は CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額は Cost Explorer で確認します。
-- 履歴を AppSync 経由にしているのは、AppSync が ID トークンを検証して `sub` を取り出すので、利用者を偽れないためです
-  (IAM 認証だと、AppSync に見えるのはアプリが付けた STS のセッション名で、なりすましを防ぎにくい)。
+- 履歴を API Gateway 経由にしているのは、JWT オーソライザーが ID トークンを検証して `sub` を Lambda に渡すので、利用者を偽れないためです
+  (アプリが一時認証情報で DynamoDB を直接読み書きすると、ほかの人の項目に届かないようにするのが難しい)。
   このため、アプリのロールに DynamoDB の権限は要りません。
 - トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
 
@@ -134,7 +151,7 @@ flowchart LR
 - リフレッシュトークンは `offline_access` スコープで受け取ります (既定のスコープに入っています)
 - ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 3 か所) は、どれもこの末尾の `/` まで合わせてください
   - IAM の OIDC プロバイダー: 信頼ポリシーの条件キーも `<テナント>.auth0.com/:aud` と `/` 入りになります
-  - AppSync の issuer (Terraform の `oidc_issuer`。IAM の OIDC プロバイダーも同じ値から作ります)
+  - API Gateway の JWT オーソライザーの issuer (Terraform の `oidc_issuer`。IAM の OIDC プロバイダーも同じ値から作ります)
   - Collector の `issuer_url` (`infra/otel-collector.yaml`)
 - ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
 - 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
@@ -149,18 +166,19 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 | IAM の OIDC プロバイダー | Auth0 の issuer を登録 (audience = Client ID)。既にあれば `create_oidc_provider = false` |
 | IAM ロール (アプリ用) | 信頼: Auth0 の ID トークンだけ (`<テナント>.auth0.com/:aud` = Client ID)。権限: Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB の権限は持たない |
 | DynamoDB テーブル | チャット履歴 (`pk` = 利用者の `sub`、`sk` = 会話 ID) |
-| AppSync (GraphQL) | OpenID Connect 認証 (Auth0 の ID トークン)。スキーマは `schema.graphql`、リゾルバーは `resolvers/*.js` |
-| 利用料金の Lambda (任意) | `langfuse_secret_arn` を指定したときだけ作る。コードは TypeScript (`lambda/usage/src/index.ts`) で、esbuild で 1 つの JS にまとめる |
+| API Gateway (HTTP API) | JWT オーソライザー (Auth0 の ID トークンの署名・`iss`・`aud`・期限を検証)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
+| チャット履歴の Lambda | `app/backend/src/history.ts`。DynamoDB の読み書きだけの権限 |
+| 利用料金の Lambda (任意) | `app/backend/src/usage.ts`。`langfuse_secret_arn` を指定したときだけ作る (作らなければ `/usage` は 404 で、画面にも出ない) |
 
 ```sh
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id などを入れる
-# 利用料金の Lambda を作るとき (langfuse_secret_arn を指定するとき) だけ、先にビルドする
-npm --prefix lambda/usage ci && npm --prefix lambda/usage run build
+# Lambda (app/backend の TypeScript) を先にビルドする (esbuild で dist/history.mjs と dist/usage.mjs を作る)
+npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build
 terraform init
 terraform plan
 terraform apply
-terraform output   # chat_api_url → CHAT_API_URL、app_role_arn → AWS_ROLE_ARN
+terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、app_role_arn → AWS_ROLE_ARN
 ```
 
 - state の置き場所 (S3 など) は、チームの方針に合わせて `backend` を足してください (今はローカル)
@@ -169,7 +187,8 @@ terraform output   # chat_api_url → CHAT_API_URL、app_role_arn → AWS_ROLE_A
 - テーブルは会話 1 件を 1 項目にし、メッセージは gzip + base64 で 1 つの属性に入れます。
   上限 (400KB) を超えそうなときは、長いツールの出力を切り詰め、それでも大きければ古いメッセージから落とします
 - 一覧は 1 人あたり新しい順に最大 200 件です
-- リゾルバーは `ctx.identity.sub` 以外の利用者を指定できないので、他人の会話には届きません
+- Lambda はオーソライザーが検証した `sub` 以外の利用者を指定できないので、他人の会話には届きません
+- API の料金はリクエスト数で決まります (HTTP API は 100 万件あたり約 1 USD)。会話 1 回で保存と一覧の読み直しが数回起きます
 - `chat_api_url` を設定しなければ、履歴は保存しません
 
 ## 動かし方
@@ -179,18 +198,21 @@ terraform output   # chat_api_url → CHAT_API_URL、app_role_arn → AWS_ROLE_A
 ### まず試す (全部模擬)
 
 ```sh
+cd app/desktop
 npm install
 npm run dev:mock
 ```
 
+以下、アプリのコマンドはどれも `app/desktop` で実行します。
+
 `dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、Auth0、AWS STS、Bedrock、
-AgentCore Code Interpreter、AppSync、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
+AgentCore Code Interpreter、API Gateway (バックエンド)、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
 
 - 「ログイン」を押すとブラウザが開き、すぐに「模擬 太郎」でログインした状態になります
 - 何か送ると、模擬の Bedrock が決まった筋書きで MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
   (画面やツール表示の開発向け。回答の中身は意味のあるものではありません)
 - 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
-- 模擬の AppSync がチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
+- 模擬のバックエンドがチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
 - 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Collector へのトレース送信と ID トークンの利用者など) はターミナルに `[mock]` で出ます
 - 例の MCP サーバー (`examples/time-mcp`) の依存は、初回に自動でインストールします
 
@@ -214,6 +236,7 @@ AgentCore Code Interpreter を呼びます。そのプロファイルには、�
 ### 本物の環境で動かす
 
 ```sh
+cd app/desktop
 npm install
 cp .env.example .env            # OAuth / AWS / モデルの設定
 cp mcp.example.json mcp.json    # 使う MCP サーバー (例は examples/time-mcp)
@@ -230,7 +253,7 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
-| `CHAT_API_URL` | チャット履歴と利用料金の AppSync GraphQL URL。未設定なら使わない。ログインしていないとき (`dev:aws`) も使わない |
+| `CHAT_API_URL` | チャット履歴と利用料金の API (API Gateway の URL)。未設定なら使わない。ログインしていないとき (`dev:aws`) も使わない |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
@@ -293,7 +316,7 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 ログイン中は、ヘッダーに「今日 $x · 今月 $y」を出します (Langfuse が計算した推定額)。
 
 ```
-アプリ ─(ID トークン)→ AppSync の usage クエリ ─(検証済みの sub だけ)→ Lambda (VPC 内)
+アプリ ─(ID トークン)→ API Gateway の GET /usage ─(検証済みの sub だけ)→ Lambda (VPC 内)
       → Langfuse の /api/public/metrics/daily?userId=<sub>  (キーは Secrets Manager)
 ```
 
@@ -354,11 +377,11 @@ AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT
 - macOS: `~/Library/Application Support/dev.example.rig-agui-chat/config.json`
 - Linux: `~/.config/dev.example.rig-agui-chat/config.json`
 
-フォルダ名は `src-tauri/tauri.conf.json` の `identifier` です。配布前に自分たちの値に変えてください。
+フォルダ名は `app/desktop/src-tauri/tauri.conf.json` の `identifier` です。配布前に自分たちの値に変えてください。
 
 ### 環境ごとにビルドする
 
-設定ファイルは、キーが環境変数と同じ名前の JSON です。例は `config/dev.example.json` と `config/prod.example.json` にあります。
+設定ファイルは、キーが環境変数と同じ名前の JSON です。例は `app/desktop/config/dev.example.json` と `app/desktop/config/prod.example.json` にあります。以下は `app/desktop` で実行します。
 
 ```sh
 cp config/prod.example.json config/prod.json   # 値を本番用に書き換える
@@ -379,7 +402,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
   - ビルド時の設定に入っていると、ビルドが失敗します
   - `config.json` に入っていると、無視して起動ログに書きます
 - 値はすべて文字列で書きます (`"true"`、`"53682"` など)
-- 一覧は `src-tauri/src/config_keys.rs` にあります
+- 一覧は `app/desktop/src-tauri/src/config_keys.rs` にあります
 
 起動時のログ (標準エラー) に、どのキーをどこから読んだかが出ます。値そのものは出しません。
 
@@ -387,23 +410,24 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 
 | パス | 内容 |
 | --- | --- |
-| `src/App.tsx` | ログイン画面、ヘッダー、会話一覧、CopilotKit (v2) と HttpAgent |
-| `src/ToolCallCard.tsx` | ツール呼び出しのカード表示 |
-| `src/components/ui/` / `src/index.css` / `components.json` | shadcn/ui の部品とテーマ。部品は `npx shadcn@latest add <名前>` で足せる |
-| `src-tauri/src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
-| `src-tauri/src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
-| `src-tauri/src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |
-| `src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
-| `src-tauri/src/tools/` | Code Interpreter と stdio MCP |
-| `src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
-| `src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
-| `src-tauri/src/history.rs` | チャット履歴 (AppSync の GraphQL API) |
-| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、AppSync、DynamoDB、利用料金の Lambda) |
+| `app/desktop/src/App.tsx` | ログイン画面、ヘッダー、会話一覧、CopilotKit (v2) と HttpAgent |
+| `app/desktop/src/ToolCallCard.tsx` | ツール呼び出しのカード表示 |
+| `app/desktop/src/components/ui/` / `app/desktop/src/index.css` / `app/desktop/components.json` | shadcn/ui の部品とテーマ。部品は `npx shadcn@latest add <名前>` で足せる |
+| `app/desktop/src-tauri/src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
+| `app/desktop/src-tauri/src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
+| `app/desktop/src-tauri/src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |
+| `app/desktop/src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
+| `app/desktop/src-tauri/src/tools/` | Code Interpreter と stdio MCP |
+| `app/desktop/src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
+| `app/desktop/src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
+| `app/desktop/src-tauri/src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`) |
+| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
+| `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金) |
 | `infra/otel-collector.yaml` | EKS 上の OpenTelemetry Collector の設定例 (ID トークンで受けて Langfuse へ送る) |
-| `src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
-| `examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
-| `dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / AppSync / Collector / Langfuse) |
-| `dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
+| `app/desktop/src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
+| `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
+| `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
+| `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
 
 ## 補足
 
