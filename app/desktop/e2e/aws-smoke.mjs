@@ -1,17 +1,17 @@
 // 本物の AWS への疎通確認。アプリが使うサービスを 1 つずつ最小の呼び出しで確かめる。
 //
-//   AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run smoke:aws
+//   AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm smoke:aws   (リポジトリのルートで)
 //
-// 使う認証は AWS SDK 標準 (AWS_PROFILE / SSO / 環境変数のキーなど)。`npm run dev:aws` と同じ。
+// 使う認証は AWS SDK 標準 (AWS_PROFILE / SSO / 環境変数のキーなど)。`pnpm dev:aws` と同じ。
 // 確かめること:
 //   1. STS          … 認証情報が有効か (GetCallerIdentity)
 //   2. Bedrock      … BEDROCK_MODEL_ID のモデルを呼べるか (最大 16 トークンだけ。数円未満の費用がかかる)
 //   3. AgentCore    … Code Interpreter のセッションを開始 → print(1 + 1) を実行 → 終了 (CODE_INTERPRETER_ID=off で省略)
 //   4. API Gateway  … CHAT_API_URL があれば、トークンなしで 401 になる (JWT オーソライザーが効いている) こと。
 //                      ID_TOKEN (ログインで得た ID トークン) も渡せば、/threads と /usage が 200 になること
-// 設定は環境変数のほか、app/desktop/.env も読む (環境変数が優先)。
+// 設定は環境変数のほか、app/desktop/.env とルートの .env.cloud も読む (環境変数が優先)。
+// pnpm dev-env up で自分の開発環境を作っていれば、CHAT_API_URL は .env.cloud から入る。
 
-import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
@@ -22,14 +22,11 @@ import {
   StartCodeInterpreterSessionCommand,
   StopCodeInterpreterSessionCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
+import { loadCloudEnv } from "../dev/env-file.mjs";
 
-const envFile = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env");
-if (existsSync(envFile)) {
-  for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-}
+// app/desktop/.env と、ルートの .env.cloud (pnpm dev-env up が書く接続先) も読む。環境変数が優先
+loadCloudEnv(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
+loadCloudEnv();
 
 const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "ap-northeast-1";
 const modelId = process.env.BEDROCK_MODEL_ID || "global.anthropic.claude-sonnet-5-5";

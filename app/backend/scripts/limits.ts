@@ -1,12 +1,12 @@
 // 利用上限の管理 (管理者用 CLI)。管理者の AWS 認証情報 (AWS_PROFILE など) で DynamoDB を直接読み書きする。
 // アプリや API Gateway からは変えられない (利用者が自分の上限を変えられないように)。
 //
-//   npm run limits -- list                 利用者の一覧 (sub・利用者名・今月の料金・上限)
-//   npm run limits -- get     <sub>        1 人の設定
-//   npm run limits -- set     <sub> <USD>  その人の月の上限 (0 = 上限なし)
-//   npm run limits -- unset   <sub>        その人の上限を消して既定値 (default_monthly_limit_usd) に戻す
-//   npm run limits -- reset   <sub>        今この時点から数え直す (今月のここまでの使用額を 0 として扱う)
-//   npm run limits -- unreset <sub>        手動リセットを取り消す (月初から数える)
+//   pnpm limits list                 利用者の一覧 (sub・利用者名・今月の料金・上限)
+//   pnpm limits get     <sub>        1 人の設定
+//   pnpm limits set     <sub> <USD>  その人の月の上限 (0 = 上限なし)
+//   pnpm limits unset   <sub>        その人の上限を消して既定値 (default_monthly_limit_usd) に戻す
+//   pnpm limits reset   <sub>        今この時点から数え直す (今月のここまでの使用額を 0 として扱う)
+//   pnpm limits unreset <sub>        手動リセットを取り消す (月初から数える)
 //
 // テーブル名は LIMITS_TABLE (terraform output -raw limits_table_name)。
 // <sub> は ID トークンの sub (Auth0 の user_id、例 "auth0|abc..."。Langfuse の User ID と同じ)。
@@ -20,7 +20,7 @@ const [command, sub, value] = process.argv.slice(2);
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function usage(): never {
-  console.error("使い方: npm run limits -- <list | get <sub> | set <sub> <USD> | unset <sub> | reset <sub> | unreset <sub>>");
+  console.error("使い方: pnpm limits <list | get <sub> | set <sub> <USD> | unset <sub> | reset <sub> | unreset <sub>>");
   process.exit(2);
 }
 

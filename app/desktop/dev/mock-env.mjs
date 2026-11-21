@@ -13,8 +13,9 @@ const isWindows = process.platform === "win32";
 export function exampleMcpConfig() {
   const dir = join(root, "examples", "time-mcp");
   if (!existsSync(join(dir, "node_modules"))) {
-    console.error("[dev] 例の MCP サーバーの依存をインストールします…");
-    spawnSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir, stdio: "inherit", shell: isWindows });
+    // pnpm workspace の一部なので、ルートの pnpm install で入る
+    console.error("[dev] 依存をインストールします (pnpm install)…");
+    spawnSync("pnpm", ["install"], { cwd: resolve(root, "..", ".."), stdio: "inherit", shell: isWindows });
   }
   const path = join(mkdtempSync(join(tmpdir(), "rig-agui-dev-")), "mcp.json");
   writeFileSync(path, JSON.stringify({ mcpServers: { time: { command: "node", args: [join(dir, "server.mjs")] } } }, null, 2));
