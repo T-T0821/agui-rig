@@ -354,6 +354,7 @@ AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT
 
 ```sh
 # Linux (Ubuntu) の例。Tauri の前提パッケージに加えて WebKitWebDriver と Xvfb が要る
+# (WebKitWebDriver のパッケージは Ubuntu 24.04 までは webkit2gtk-driver、新しい版は webkitgtk-webdriver)
 sudo apt-get install -y webkit2gtk-driver xvfb ffmpeg fonts-noto-cjk
 cargo install tauri-driver --locked
 
