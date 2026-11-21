@@ -1,6 +1,8 @@
 # 利用料金 (任意): API Gateway (GET /usage) → Lambda (VPC 内) → Langfuse の集計 API
 # Langfuse のキーは Secrets Manager にあり、この Lambda だけが読む (アプリには渡さない)。
 # Lambda はオーソライザーが検証した sub の金額だけを返す。作らなければ /usage は 404 になり、アプリは料金を出さない。
+# 利用上限: 既定値は default_monthly_limit_usd、利用者ごとの上限と手動リセットは limits テーブル (管理者が
+# app/backend の `npm run limits` で書く)。Lambda は読むだけ。上限は毎月の月初に自動で戻る。
 
 locals {
   usage_enabled = var.langfuse_secret_arn != ""
@@ -17,6 +19,27 @@ data "archive_file" "usage" {
       condition     = fileexists("${local.backend_dist}/usage.mjs")
       error_message = "バックエンドの Lambda がビルドされていません。先に npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build を実行してください。"
     }
+  }
+}
+
+# pk = 利用者の sub。monthlyLimitUsd (0 = 上限なし)、resetAt (手動リセットの時刻)
+resource "aws_dynamodb_table" "limits" {
+  count        = local.usage_enabled ? 1 : 0
+  name         = "${var.name}-usage-limits"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
   }
 }
 
@@ -46,10 +69,24 @@ resource "aws_iam_role_policy" "usage_function_secret" {
   })
 }
 
+resource "aws_iam_role_policy" "usage_function_limits" {
+  count = local.usage_enabled ? 1 : 0
+  name  = "usage-limits-read"
+  role  = aws_iam_role.usage_function[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "dynamodb:GetItem"
+      Resource = aws_dynamodb_table.limits[0].arn
+    }]
+  })
+}
+
 resource "aws_lambda_function" "usage" {
   count            = local.usage_enabled ? 1 : 0
   function_name    = "${var.name}-usage"
-  description      = "Langfuse から、呼び出した利用者 (sub) の今日と今月の料金を返す"
+  description      = "Langfuse から、呼び出した利用者 (sub) の今日と今月の料金と利用上限の状態を返す"
   runtime          = "nodejs22.x"
   handler          = "usage.handler"
   timeout          = 15
@@ -65,9 +102,12 @@ resource "aws_lambda_function" "usage" {
 
   environment {
     variables = {
-      LANGFUSE_HOST       = var.langfuse_host
-      LANGFUSE_SECRET_ARN = var.langfuse_secret_arn
-      UTC_OFFSET_MINUTES  = tostring(var.utc_offset_minutes)
+      LANGFUSE_HOST             = var.langfuse_host
+      LANGFUSE_SECRET_ARN       = var.langfuse_secret_arn
+      UTC_OFFSET_MINUTES        = tostring(var.utc_offset_minutes)
+      LIMITS_TABLE              = aws_dynamodb_table.limits[0].name
+      DEFAULT_MONTHLY_LIMIT_USD = tostring(var.default_monthly_limit_usd)
+      LIMIT_WARN_RATIO          = tostring(var.limit_warn_ratio)
     }
   }
 

@@ -169,6 +169,7 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 | API Gateway (HTTP API) | JWT オーソライザー (Auth0 の ID トークンの署名・`iss`・`aud`・期限を検証)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
 | チャット履歴の Lambda | `app/backend/src/history.ts`。DynamoDB の読み書きだけの権限 |
 | 利用料金の Lambda (任意) | `app/backend/src/usage.ts`。`langfuse_secret_arn` を指定したときだけ作る (作らなければ `/usage` は 404 で、画面にも出ない) |
+| 利用上限の DynamoDB テーブル (任意) | 利用料金と一緒に作る。`pk` = 利用者の `sub`、利用者ごとの上限と手動リセットの時刻。Lambda は読むだけ、書くのは管理者だけ |
 
 ```sh
 cd infra/terraform
@@ -328,6 +329,37 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 - 「今日」「今月」の区切りは `utc_offset_minutes` (既定 540 = 日本時間) です
 - Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
 
+#### 利用者ごとの利用上限とリセット
+
+管理者が利用者ごとに月の利用上限 (USD、Langfuse の推定額) を決め、上限に達した利用者は新しいメッセージを送れなくなります。
+利用者のアプリからは上限を変えられません。
+
+| 設定 | どこで | 内容 |
+| --- | --- | --- |
+| 全員の既定の上限 | Terraform の `default_monthly_limit_usd` | 0 なら上限なし (既定) |
+| 警告を出す割合 | Terraform の `limit_warn_ratio` | 既定 0.8 (上限の 80% で画面に警告) |
+| 個別の上限・手動リセット | 管理者が `npm run limits` | 利用上限のテーブルに書く |
+
+```sh
+cd app/backend
+export LIMITS_TABLE=$(terraform -chdir=../../infra/terraform output -raw limits_table_name)
+# 管理者の AWS 認証情報 (AWS_PROFILE など) で実行する
+npm run limits -- set   "auth0|abc123" 50   # この人の月の上限を $50 に (0 = 上限なし)
+npm run limits -- unset "auth0|abc123"      # 既定の上限に戻す
+npm run limits -- reset "auth0|abc123"      # 今から数え直す (今月のここまでの使用額を 0 として扱う)
+npm run limits -- unreset "auth0|abc123"    # 手動リセットを取り消す
+npm run limits -- get   "auth0|abc123"
+npm run limits -- list
+```
+
+- `<sub>` は ID トークンの `sub` (Auth0 の user_id)。Langfuse の User ID と同じです
+- **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。Lambda が「月初からの料金」と上限を比べるだけなので、定期実行のジョブはありません
+- **手動リセット**: `reset` で `resetAt` に今の時刻が入り、今月はその時刻からの料金で比べます。翌月になると自然に月初からに戻ります
+- アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます (結果は 30 秒使い回し、上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます)。ヘッダーに「上限 $使用 / $上限」を、上限に近づくと警告、達すると赤い案内を出します
+- `/usage` を確かめられない (Langfuse の障害など) ときは止めません。また Langfuse の集計は遅れるので、上限を最大で 1〜2 回の実行分ほど超えることがあります
+- 上限の判定はアプリ (Rust) が行います。アプリは Bedrock を STS の一時認証情報で直接呼ぶので、改造したアプリなら上限を無視できます。確実に止めるには Bedrock の呼び出しをサーバー側 (API Gateway + Lambda など) に寄せる必要があります
+- Lambda のサブネットから DynamoDB に届く必要があります (DynamoDB のゲートウェイ型 VPC エンドポイントか NAT)
+
 #### 本番は Collector 経由で、ID トークンで認証して送る
 
 Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、利用者の PC には置きません。
@@ -359,6 +391,7 @@ ANTHROPIC_API_KEY=...
 ### 模擬サーバーと AWS のエンドポイント
 
 `npm run dev:mock` の模擬サーバーは単体でも起動できます (`npm run mock-server`)。
+`MOCK_MONTHLY_LIMIT_USD=1.24 npm run dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
 
 ## 配布するとき (設定の渡し方)
@@ -420,9 +453,10 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `app/desktop/src-tauri/src/tools/` | Code Interpreter と stdio MCP |
 | `app/desktop/src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
 | `app/desktop/src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
-| `app/desktop/src-tauri/src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`) |
+| `app/desktop/src-tauri/src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`)、実行前の利用上限の確認 |
 | `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
-| `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金) |
+| `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限) |
+| `app/backend/scripts/limits.ts` | 管理者用 CLI (`npm run limits`): 利用者ごとの上限と手動リセット |
 | `infra/otel-collector.yaml` | EKS 上の OpenTelemetry Collector の設定例 (ID トークンで受けて Langfuse へ送る) |
 | `app/desktop/src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
