@@ -23,7 +23,7 @@ output "usage_enabled" {
 }
 
 output "limits_table_name" {
-  description = "利用上限のテーブル (app/backend の npm run limits の LIMITS_TABLE)。利用料金を作らなければ null"
+  description = "利用上限のテーブル (pnpm limits の LIMITS_TABLE)。利用料金を作らなければ null"
   value       = local.usage_enabled ? aws_dynamodb_table.limits[0].name : null
 }
 

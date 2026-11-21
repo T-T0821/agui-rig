@@ -1,6 +1,6 @@
 # バックエンド: アプリ ─(ID トークン)→ API Gateway (HTTP API + JWT オーソライザー) → Lambda → DynamoDB
 # Lambda のコードは app/backend (TypeScript)。terraform plan の前にビルドする:
-#   npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build
+#   リポジトリのルートで pnpm install && pnpm backend:build
 # Lambda はオーソライザーが検証した ID トークンの sub だけで利用者を分ける。
 
 locals {
@@ -86,7 +86,7 @@ data "archive_file" "history" {
   lifecycle {
     precondition {
       condition     = fileexists("${local.backend_dist}/history.mjs")
-      error_message = "バックエンドの Lambda がビルドされていません。先に npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build を実行してください。"
+      error_message = "バックエンドの Lambda がビルドされていません。先に リポジトリのルートで pnpm install && pnpm backend:build を実行してください。"
     }
   }
 }

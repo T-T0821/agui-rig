@@ -8,10 +8,6 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
-    "dev:mock": "node dev/run.mjs mock",
-    "dev:aws": "node dev/run.mjs aws",
-    "dev:cloud": "node dev/run.mjs cloud",
-    "dev-env": "node dev/cloud-env.mjs",
     "mock-server": "node dev/mock-server.mjs"
   },
   "dependencies": {

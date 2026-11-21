@@ -1,11 +1,11 @@
-// 開発者ごとの開発環境 (AWS 上の自分専用のバックエンド) を作る・消す。
-//   npm run dev-env -- up      [--user <名前>] [--email <メール>] [--region <リージョン>] [-- <terraform apply の引数>]
-//   npm run dev-env -- down    [--user <名前>] [-- <terraform destroy の引数>]
-//   npm run dev-env -- status  [--user <名前>]
-//   npm run dev-env -- list
+// 開発者ごとの開発環境 (AWS 上の自分専用のバックエンド) を作る・消す。ルート (リポジトリの一番上) で実行する。
+//   pnpm dev-env up      [--user <名前>] [--email <メール>] [--region <リージョン>] [-- <terraform apply の引数>]
+//   pnpm dev-env down    [--user <名前>] [-- <terraform destroy の引数>]
+//   pnpm dev-env status  [--user <名前>]
+//   pnpm dev-env list
 // infra/terraform を Terraform workspace `dev-<名前>` で、名前の接頭辞 `agui-rig-dev-<名前>` で apply する。
 // Cognito のユーザープール・IAM ロール・API Gateway・Lambda・DynamoDB はすべて開発者ごとに別。
-// up の後は `npm run dev:cloud` で、本物のログイン (Cognito) つきでこの環境に向けてアプリを起動する。
+// up の後は `pnpm dev:cloud` で、本物のログイン (Cognito) つきでこの環境に向けてアプリを起動する。
 // 必要なもの: terraform (1.6 以上)、aws CLI、AWS の認証 (AWS_PROFILE / aws sso login など。IAM・Cognito・Lambda などを作れる権限)
 
 import { spawnSync } from "node:child_process";
@@ -18,7 +18,7 @@ const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(desktop, "..", "..");
 const tfDir = join(repo, "infra", "terraform");
 const backendDir = join(repo, "app", "backend");
-/** `npm run dev:cloud` が読む、自分の環境の接続先 (git には入れない) */
+/** `pnpm dev:cloud` が読む、自分の環境の接続先 (git には入れない) */
 const CLOUD_ENV_FILE = join(desktop, ".dev-cloud.json");
 const isWindows = process.platform === "win32";
 
@@ -120,8 +120,8 @@ function outputs() {
 function ensureBackendBuilt() {
   if (existsSync(join(backendDir, "dist", "history.mjs"))) return;
   console.error("[dev-env] バックエンドの Lambda をビルドします…");
-  if (!existsSync(join(backendDir, "node_modules"))) run("npm", ["ci", "--no-audit", "--no-fund"], { cwd: backendDir, shell: isWindows });
-  run("npm", ["run", "build"], { cwd: backendDir, shell: isWindows });
+  if (!existsSync(join(backendDir, "node_modules"))) run("pnpm", ["install", "--frozen-lockfile"], { cwd: repo, shell: isWindows });
+  run("pnpm", ["run", "build"], { cwd: backendDir, shell: isWindows });
 }
 
 /** 自分のメールアドレスで Cognito の利用者を作る (既にあれば何もしない)。仮パスワードはメールで届く。 */
@@ -176,7 +176,7 @@ function selectWorkspace(ws, { create }) {
   if (create) {
     terraform(["workspace", "select", "-or-create", ws]);
   } else {
-    if (!workspaces().includes(ws)) fail(`workspace ${ws} がありません (npm run dev-env -- list で確認)`);
+    if (!workspaces().includes(ws)) fail(`workspace ${ws} がありません (pnpm dev-env list で確認)`);
     terraform(["workspace", "select", ws]);
   }
   if (currentWorkspace() !== ws) fail(`workspace を ${ws} に切り替えられませんでした`);
@@ -209,8 +209,8 @@ switch (command) {
     console.error(`
 [dev-env] ${user} の開発環境ができました (workspace ${ws}, 接頭辞 ${name})
   接続先: ${CLOUD_ENV_FILE}
-  起動:   npm run dev:cloud   (${email} でログイン)
-  削除:   npm run dev-env -- down`);
+  起動:   pnpm dev:cloud   (${email} でログイン)
+  削除:   pnpm dev-env down`);
     break;
   }
 
@@ -246,7 +246,7 @@ switch (command) {
     const user = resolveUser(opts);
     selectWorkspace(workspaceOf(user), { create: false });
     const out = outputs();
-    if (!out.chat_api_url) fail(`${user} の開発環境はまだ作られていません (npm run dev-env -- up)`);
+    if (!out.chat_api_url) fail(`${user} の開発環境はまだ作られていません (pnpm dev-env up)`);
     console.log(JSON.stringify(writeCloudEnv(user, out), null, 2));
     break;
   }
@@ -259,6 +259,6 @@ switch (command) {
   }
 
   default:
-    console.error("使い方: npm run dev-env -- up | down | status | list  [--user <名前>] [--email <メール>] [--region <リージョン>]");
+    console.error("使い方: pnpm dev-env up | down | status | list  [--user <名前>] [--email <メール>] [--region <リージョン>]");
     process.exit(1);
 }

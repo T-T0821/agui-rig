@@ -23,8 +23,10 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 ## フォルダ構成
 
 ```
+package.json      コマンドはすべてここ (ルート) から pnpm で実行する
+pnpm-workspace.yaml   pnpm workspace (app/desktop、app/desktop/examples/time-mcp、app/backend)
 app/
-  desktop/        デスクトップアプリ (Tauri)。npm のコマンドはここで実行する
+  desktop/        デスクトップアプリ (Tauri)
     src/          画面 (React + CopilotKit + shadcn/ui)
     src-tauri/    Rust (Rig のエージェント、ログイン、AWS の呼び出し)
     dev/          模擬サーバーと開発用の起動スクリプト
@@ -138,7 +140,7 @@ flowchart LR
   Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
   Usage -- "上限を読む / sub・利用者名・料金を記録" --> Limits[("DynamoDB<br/>利用上限")]
-  Admin["管理者<br/>npm run limits"] -- "上限の設定・手動リセット (AWS 認証情報)" --> Limits
+  Admin["管理者<br/>pnpm limits"] -- "上限の設定・手動リセット (AWS 認証情報)" --> Limits
   App -- "⑦ OTLP/HTTP (ID トークン)" --> Collector
   Collector -. "JWKS で検証" .-> IdP
   Collector --> Langfuse
@@ -155,7 +157,7 @@ flowchart LR
 | ⑤ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (API Gateway の JWT オーソライザー) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
 | ⑥ アプリ → API Gateway → Lambda (VPC 内) → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。Langfuse のキーは Secrets Manager に置き、Lambda だけが読む。Lambda は利用上限のテーブルを読み、`sub`・利用者名・最新の料金を記録する |
 | ⑦ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
-| 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`npm run limits`)。利用者からは変えられない |
+| 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`pnpm limits`)。利用者からは変えられない |
 
 番号は上の図の番号と同じです。
 
@@ -238,7 +240,7 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id などを入れる
 # Lambda (app/backend の TypeScript) を先にビルドする (esbuild で dist/history.mjs と dist/usage.mjs を作る)
-npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build
+(cd ../.. && pnpm install && pnpm backend:build)
 terraform init
 terraform plan
 terraform apply
@@ -263,21 +265,20 @@ terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、app_r
 他の人の環境に影響を与えずに試せます。
 
 ```sh
-cd app/desktop
 aws sso login --profile my-dev                     # など。IAM・Cognito・Lambda などを作れる権限が要る
 export AWS_PROFILE=my-dev
-npm run dev-env -- up --user alice --email alice@example.com   # 作る (terraform apply の確認が出る)
-npm run dev:cloud                                  # 自分の環境に向けてアプリを起動し、そのメールでログイン
-npm run dev-env -- down --user alice               # 丸ごと消す
+pnpm dev-env up --user alice --email alice@example.com   # 作る (terraform apply の確認が出る)
+pnpm dev:cloud                                  # 自分の環境に向けてアプリを起動し、そのメールでログイン
+pnpm dev-env down --user alice               # 丸ごと消す
 ```
 
 | コマンド | 内容 |
 | --- | --- |
-| `npm run dev-env -- up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `app/desktop/.dev-cloud.json` に書く |
-| `npm run dev:cloud` | `.dev-cloud.json` の接続先 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
-| `npm run dev-env -- status` | 自分の環境の出力を表示し、`.dev-cloud.json` を書き直す |
-| `npm run dev-env -- down` | `terraform destroy` の後、workspace と `.dev-cloud.json` を消す |
-| `npm run dev-env -- list` | この state にある開発者ごとの環境 (`dev-*` の workspace) |
+| `pnpm dev-env up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `app/desktop/.dev-cloud.json` に書く |
+| `pnpm dev:cloud` | `.dev-cloud.json` の接続先 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
+| `pnpm dev-env status` | 自分の環境の出力を表示し、`.dev-cloud.json` を書き直す |
+| `pnpm dev-env down` | `terraform destroy` の後、workspace と `.dev-cloud.json` を消す |
+| `pnpm dev-env list` | この state にある開発者ごとの環境 (`dev-*` の workspace) |
 
 - **名前**: `--user` > `DEV_ENV_USER` > OS のユーザ名 (英小文字・数字・ハイフン、20 文字まで)。リソース名の接頭辞は `agui-rig-dev-<名前>` です。
   メールは `--email` > `DEV_ENV_EMAIL` > `git config user.email`、リージョンは `--region` > `AWS_REGION` > `ap-northeast-1`
@@ -287,24 +288,41 @@ npm run dev-env -- down --user alice               # 丸ごと消す
 - **作らないもの**: 利用料金と利用上限 (Langfuse と VPC が要るため)。画面に料金は出ません。トレースも既定では送りません
 - **消し忘れ**: 全リソースに `Environment=dev`、`Owner=<名前>` のタグが付くので、
   `aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=dev` などで探せます
-- `--` の後ろは Terraform にそのまま渡ります (例: `npm run dev-env -- up -- -auto-approve -var 'bedrock_model_arns=["..."]'`)
+- `--` の後ろは Terraform にそのまま渡ります (例: `pnpm dev-env up -- -auto-approve -var 'bedrock_model_arns=["..."]'`)
 - state は既定ではローカル (`infra/terraform/terraform.tfstate.d/dev-<名前>/`) です。チームで S3 などの `backend` を足せば、
   workspace ごとに別の state になり、`list` で全員の環境が見えます
 - IAM の OIDC プロバイダーはアカウントあたり 100 個までなので、開発者がそれ以上になる場合は共用の開発環境 (上の Cognito の節) を使ってください
 
 ## 動かし方
 
-必要なもの: Node.js 20 以上、Rust 1.97.1 以上、[Tauri の前提パッケージ](https://v2.tauri.app/start/prerequisites/) (Windows は WebView2 と MSVC ビルドツール)。
+必要なもの: Node.js 20 以上、pnpm 10 (`corepack enable` で `package.json` の `packageManager` の版が使われます)、Rust 1.97.1 以上、[Tauri の前提パッケージ](https://v2.tauri.app/start/prerequisites/) (Windows は WebView2 と MSVC ビルドツール)。
+
+コマンドはすべてリポジトリのルートの `package.json` にまとめてあり、ルートで `pnpm <コマンド>` として実行します。
+
+| コマンド | 内容 |
+| --- | --- |
+| `pnpm install` | 全 workspace (アプリ、例の MCP サーバー、バックエンド) の依存を入れる |
+| `pnpm dev:mock` | 全部模擬で起動 (下の「まず試す」) |
+| `pnpm dev:aws` | ログインを省略して本物の AWS で起動 |
+| `pnpm dev-env up` / `down` / `status` / `list` | 自分専用の AWS 開発環境を作る・消す ([開発者ごとの AWS 開発環境](#開発者ごとの-aws-開発環境)) |
+| `pnpm dev:cloud` | 自分専用の AWS 開発環境に向けて起動 |
+| `pnpm tauri <引数>` | `app/desktop` で Tauri CLI を実行 (`pnpm tauri dev`、`pnpm tauri build` など) |
+| `pnpm mock-server` | 模擬サーバーだけを起動 |
+| `pnpm desktop:build` | 画面 (Vite) のビルド |
+| `pnpm backend:build` / `backend:test` / `backend:typecheck` | バックエンドの Lambda のビルド・テスト・型チェック |
+| `pnpm limits <サブコマンド>` | 利用上限の管理 ([利用上限](#トレースと利用料金-langfuse)) |
+| `pnpm check` | 型チェック・テスト・ビルドをまとめて (CI と同じ) |
+
+引数はそのまま渡せます (`pnpm dev-env up --user alice`)。`--` の後ろは、`dev-env` では Terraform への引数になります。
 
 ### まず試す (全部模擬)
 
 ```sh
-cd app/desktop
-npm install
-npm run dev:mock
+pnpm install
+pnpm dev:mock
 ```
 
-以下、アプリのコマンドはどれも `app/desktop` で実行します。
+以下、コマンドはどれもリポジトリのルートで実行します (`pnpm install` は全 workspace の依存をまとめて入れます)。
 
 `dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、Auth0、AWS STS、Bedrock、
 AgentCore Code Interpreter、API Gateway (バックエンド)、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
@@ -315,13 +333,13 @@ AgentCore Code Interpreter、API Gateway (バックエンド)、OTel Collector �
 - 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
 - 模擬のバックエンドがチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
 - 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Collector へのトレース送信と ID トークンの利用者など) はターミナルに `[mock]` で出ます
-- 例の MCP サーバー (`examples/time-mcp`) の依存は、初回に自動でインストールします
+- 例の MCP サーバー (`app/desktop/examples/time-mcp`) の依存も `pnpm install` で入ります
 
 ### ログインを省略して本物の AWS で試す
 
 ```sh
 aws sso login --profile my-dev      # など、ローカルの AWS 認証を用意する
-AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run dev:aws
+AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm dev:aws
 ```
 
 Auth0 を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
@@ -331,11 +349,11 @@ AgentCore Code Interpreter を呼びます。そのプロファイルには、�
 ### 自分専用の AWS 開発環境で試す
 
 ```sh
-npm run dev-env -- up      # 初回だけ。上の「開発者ごとの AWS 開発環境」
-npm run dev:cloud
+pnpm dev-env up      # 初回だけ。上の「開発者ごとの AWS 開発環境」
+pnpm dev:cloud
 ```
 
-`npm run dev-env -- up` で作った自分の環境 (Cognito でログイン → STS → Bedrock / Code Interpreter、履歴は自分の API Gateway と DynamoDB) に向けて起動します。
+`pnpm dev-env up` で作った自分の環境 (Cognito でログイン → STS → Bedrock / Code Interpreter、履歴は自分の API Gateway と DynamoDB) に向けて起動します。
 
 `dev:mock`、`dev:aws`、`dev:cloud` は開発ビルド専用です。リリースビルドでは、
 
@@ -346,12 +364,10 @@ npm run dev:cloud
 ### 本物の環境で動かす
 
 ```sh
-cd app/desktop
-npm install
-cp .env.example .env            # OAuth / AWS / モデルの設定
-cp mcp.example.json mcp.json    # 使う MCP サーバー (例は examples/time-mcp)
-(cd examples/time-mcp && npm install)
-MCP_CONFIG=./mcp.json npm run tauri dev
+pnpm install
+cp app/desktop/.env.example app/desktop/.env            # OAuth / AWS / モデルの設定
+cp app/desktop/mcp.example.json app/desktop/mcp.json    # 使う MCP サーバー (例は examples/time-mcp)
+MCP_CONFIG=./mcp.json pnpm tauri dev                    # ./mcp.json は app/desktop からの相対
 ```
 
 設定は `.env.example` を参照してください。主なもの:
@@ -360,7 +376,7 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | --- | --- |
 | `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | ログインの IdP (本番は Auth0、開発は Cognito も可)。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
 | `OAUTH_REDIRECT_PORT` / `OAUTH_REDIRECT_HOST` | リダイレクトを受けるポートとホスト (`127.0.0.1` か `localhost`)。ホストは未設定なら、Cognito は `localhost`、それ以外は `127.0.0.1` |
-| `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`npm run dev:aws` が設定する) |
+| `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`pnpm dev:aws` が設定する) |
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
@@ -385,8 +401,8 @@ ANTHROPIC_API_KEY=...
 
 ### 模擬サーバーと AWS のエンドポイント
 
-`npm run dev:mock` の模擬サーバーは単体でも起動できます (`npm run mock-server`)。
-`MOCK_MONTHLY_LIMIT_USD=1.24 npm run dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
+`pnpm dev:mock` の模擬サーバーは単体でも起動できます (`pnpm mock-server`)。
+`MOCK_MONTHLY_LIMIT_USD=1.24 pnpm dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
 
 ## トレースと利用料金 (Langfuse)
@@ -465,25 +481,24 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 | --- | --- | --- |
 | 全員の既定の上限 | Terraform の `default_monthly_limit_usd` | 0 なら上限なし (既定) |
 | 警告を出す割合 | Terraform の `limit_warn_ratio` | 既定 0.8 (上限の 80% で画面に警告) |
-| 個別の上限・手動リセット | 管理者が `npm run limits` | 利用上限のテーブルに書く |
+| 個別の上限・手動リセット | 管理者が `pnpm limits` | 利用上限のテーブルに書く |
 
 ```sh
-cd app/backend
-export LIMITS_TABLE=$(terraform -chdir=../../infra/terraform output -raw limits_table_name)
+export LIMITS_TABLE=$(terraform -chdir=infra/terraform output -raw limits_table_name)
 # 管理者の AWS 認証情報 (AWS_PROFILE など) で実行する
-npm run limits -- set   "auth0|abc123" 50   # この人の月の上限を $50 に (0 = 上限なし)
-npm run limits -- unset "auth0|abc123"      # 既定の上限に戻す
-npm run limits -- reset "auth0|abc123"      # 今から数え直す (今月のここまでの使用額を 0 として扱う)
-npm run limits -- unreset "auth0|abc123"    # 手動リセットを取り消す
-npm run limits -- get   "auth0|abc123"
-npm run limits -- list
+pnpm limits set   "auth0|abc123" 50   # この人の月の上限を $50 に (0 = 上限なし)
+pnpm limits unset "auth0|abc123"      # 既定の上限に戻す
+pnpm limits reset "auth0|abc123"      # 今から数え直す (今月のここまでの使用額を 0 として扱う)
+pnpm limits unreset "auth0|abc123"    # 手動リセットを取り消す
+pnpm limits get   "auth0|abc123"
+pnpm limits list
 ```
 
 - `<sub>` は ID トークンの `sub` (Auth0 の user_id)。Langfuse の User ID と同じです
 - **利用状況の記録**: アプリが `/usage` を呼ぶたびに、Lambda が同じテーブルへ `sub`・利用者名・最新の料金を書きます
   - 書く項目は `monthUsd`、`periodUsd`、`limitUsd`、`blocked`、`lastSeenAt`
   - 利用者名は検証済みの ID トークンの `name` (無ければ `nickname`、`cognito:username`、`email`) で、アプリから送られた値は使いません
-  - `npm run limits -- list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
+  - `pnpm limits list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
 - **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。Lambda が「月初からの料金」と上限を比べるだけなので、定期実行のジョブはありません
 - **手動リセット**: `reset` で `resetAt` に今の時刻が入り、今月はその時刻からの料金で比べます。翌月になると自然に月初からに戻ります
 - **止め方**: アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます
@@ -511,7 +526,7 @@ Langfuse のシークレットキーはプロジェクトのデータを読み�
   利用者 ID (`langfuse.user.id`) は、アプリが送った値ではなく検証済みトークンの `sub` で上書きするので、他人の名前で料金を付けることはできません
 - Langfuse のキーは Collector にだけ渡します (Secrets Manager から External Secrets などで)
 - ID トークンが流れるので、Collector は TLS で受けてください。リリースビルドは `TELEMETRY_AUTH=id_token` のとき https 以外の送信先を拒否します
-- `npm run dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます
+- `pnpm dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます
 
 #### Collector の管理の分担
 
@@ -546,16 +561,16 @@ EKS 上の Langfuse は別のリポジトリで管理しています。Collector
 
 ### 環境ごとにビルドする
 
-設定ファイルは、キーが環境変数と同じ名前の JSON です。例は `app/desktop/config/dev.example.json` と `app/desktop/config/prod.example.json` にあります。以下は `app/desktop` で実行します。
+設定ファイルは、キーが環境変数と同じ名前の JSON です。例は `app/desktop/config/dev.example.json` と `app/desktop/config/prod.example.json` にあります。以下もルートで実行します (パスは `app/desktop` からの相対でも書けます)。
 
 ```sh
-cp config/prod.example.json config/prod.json   # 値を本番用に書き換える
-APP_CONFIG=config/prod.json npx tauri build
+cp app/desktop/config/prod.example.json app/desktop/config/prod.json   # 値を本番用に書き換える
+APP_CONFIG=config/prod.json pnpm tauri build
 ```
 
 ```powershell
 # Windows (PowerShell)
-$env:APP_CONFIG="config/prod.json"; npx tauri build
+$env:APP_CONFIG="config/prod.json"; pnpm tauri build
 ```
 
 `APP_CONFIG` を指定しなければ、何も埋め込みません。
@@ -591,7 +606,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | --- | --- |
 | `app/desktop/src/App.tsx` | ログイン画面、ヘッダー、会話一覧、CopilotKit (v2) と HttpAgent |
 | `app/desktop/src/ToolCallCard.tsx` | ツール呼び出しのカード表示 |
-| `app/desktop/src/components/ui/` / `app/desktop/src/index.css` / `app/desktop/components.json` | shadcn/ui の部品とテーマ。部品は `npx shadcn@latest add <名前>` で足せる |
+| `app/desktop/src/components/ui/` / `app/desktop/src/index.css` / `app/desktop/components.json` | shadcn/ui の部品とテーマ。部品は `app/desktop` で `pnpm dlx shadcn@latest add <名前>` で足せる |
 
 ### Rust (Tauri)
 
@@ -614,7 +629,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | パス | 内容 |
 | --- | --- |
 | `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限) |
-| `app/backend/scripts/limits.ts` | 管理者用 CLI (`npm run limits`): 利用者ごとの上限と手動リセット |
+| `app/backend/scripts/limits.ts` | 管理者用 CLI (`pnpm limits`): 利用者ごとの上限と手動リセット |
 | `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
 | `infra/otel-collector.yaml` | OpenTelemetry Collector の設定のリファレンス (ID トークンで受けて Langfuse へ送る)。デプロイは Langfuse のリポジトリ |
 
@@ -623,8 +638,8 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | パス | 内容 |
 | --- | --- |
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
-| `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` / `npm run dev:cloud` の起動スクリプト |
-| `app/desktop/dev/cloud-env.mjs` | 開発者ごとの AWS 開発環境を作る・消す (`npm run dev-env`) |
+| `app/desktop/dev/run.mjs` | `pnpm dev:mock` / `pnpm dev:aws` / `pnpm dev:cloud` の起動スクリプト |
+| `app/desktop/dev/cloud-env.mjs` | 開発者ごとの AWS 開発環境を作る・消す (`pnpm dev-env`) |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足

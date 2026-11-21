@@ -11,7 +11,7 @@ variable "name" {
 }
 
 # ---- 環境 (タグ) ----
-# 開発者ごとの開発環境は app/desktop の `npm run dev-env -- up` が environment = "dev"、owner = <ユーザ名> で作る
+# 開発者ごとの開発環境は ルートの `pnpm dev-env up` が environment = "dev"、owner = <ユーザ名> で作る
 
 variable "environment" {
   description = "環境の名前 (全リソースの Environment タグ)。例: prod、dev"
@@ -130,7 +130,7 @@ variable "utc_offset_minutes" {
 }
 
 variable "default_monthly_limit_usd" {
-  description = "利用者 1 人あたりの月の利用上限 (USD、Langfuse の推定額)。0 なら上限なし。利用者ごとの上書きは npm run limits"
+  description = "利用者 1 人あたりの月の利用上限 (USD、Langfuse の推定額)。0 なら上限なし。利用者ごとの上書きは pnpm limits"
   type        = number
   default     = 0
 

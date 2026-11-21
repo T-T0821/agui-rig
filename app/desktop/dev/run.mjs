@@ -1,7 +1,8 @@
 // 開発用の起動スクリプト。
-//   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / API Gateway / Collector を全部そこへ向ける
-//   npm run dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
-//   npm run dev:cloud … `npm run dev-env -- up` で作った自分専用の AWS の開発環境 (Cognito でログイン) に向ける
+// ルート (リポジトリの一番上) で実行する。
+//   pnpm dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / API Gateway / Collector を全部そこへ向ける
+//   pnpm dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
+//   pnpm dev:cloud … `pnpm dev-env up` で作った自分専用の AWS の開発環境 (Cognito でログイン) に向ける
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
 import { spawn, spawnSync } from "node:child_process";
@@ -18,8 +19,9 @@ const isWindows = process.platform === "win32";
 function exampleMcpConfig() {
   const dir = join(root, "examples", "time-mcp");
   if (!existsSync(join(dir, "node_modules"))) {
-    console.error("[dev] 例の MCP サーバーの依存をインストールします…");
-    spawnSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir, stdio: "inherit", shell: isWindows });
+    // pnpm workspace の一部なので、ルートの pnpm install で入る
+    console.error("[dev] 依存をインストールします (pnpm install)…");
+    spawnSync("pnpm", ["install"], { cwd: resolve(root, "..", ".."), stdio: "inherit", shell: isWindows });
   }
   const path = join(mkdtempSync(join(tmpdir(), "rig-agui-dev-")), "mcp.json");
   writeFileSync(path, JSON.stringify({ mcpServers: { time: { command: "node", args: [join(dir, "server.mjs")] } } }, null, 2));
@@ -29,7 +31,7 @@ function exampleMcpConfig() {
 function tauriDev(env, unset = []) {
   const merged = { ...process.env, ...env };
   for (const key of unset) delete merged[key];
-  const child = spawn("npx", ["tauri", "dev"], { cwd: root, stdio: "inherit", env: merged, shell: isWindows });
+  const child = spawn("pnpm", ["exec", "tauri", "dev"], { cwd: root, stdio: "inherit", env: merged, shell: isWindows });
   const stop = () => child.kill();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -77,10 +79,10 @@ if (mode === "mock") {
   });
   child.on("exit", (code) => process.exit(code ?? 0));
 } else if (mode === "cloud") {
-  // dev/cloud-env.mjs (npm run dev-env -- up) が書いた、自分の開発環境の接続先
+  // dev/cloud-env.mjs (pnpm dev-env up) が書いた、自分の開発環境の接続先
   const file = join(root, ".dev-cloud.json");
   if (!existsSync(file)) {
-    console.error("[dev] 自分の開発環境がありません。先に npm run dev-env -- up で作ってください");
+    console.error("[dev] 自分の開発環境がありません。先にルートで pnpm dev-env up を実行してください");
     process.exit(1);
   }
   const { DEV_ENV_USER: user, ...cloud } = JSON.parse(readFileSync(file, "utf8"));
@@ -98,6 +100,6 @@ if (mode === "mock") {
   );
   child.on("exit", (code) => process.exit(code ?? 0));
 } else {
-  console.error("使い方: node dev/run.mjs mock | aws | cloud");
+  console.error("使い方: pnpm dev:mock | dev:aws | dev:cloud (ルートで実行)");
   process.exit(1);
 }

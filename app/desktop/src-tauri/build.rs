@@ -1,7 +1,7 @@
 //! ビルド時の設定の埋め込み。
 //!
 //! `APP_CONFIG` に JSON ファイルのパスを渡してビルドすると、その中身をバイナリに埋め込む。
-//! 例: `APP_CONFIG=config/prod.json npx tauri build`
+//! 例: `APP_CONFIG=config/prod.json pnpm tauri build` (リポジトリのルートで。パスは app/desktop からの相対でもよい)
 //! 未指定なら空の設定 (`{}`) を埋め込む。
 //! 秘密情報や、知らないキーが入っていたらビルドを止める。
 
