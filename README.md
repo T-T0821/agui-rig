@@ -71,13 +71,23 @@ docs/images/      README の図
 - Code Interpreter のセッションはチャットのスレッドごとに 1 つ作るので、同じスレッドでは変数やファイルが引き継がれる。ログアウトやアプリ終了で止める。
 - MCP サーバーはアプリ起動時に子プロセスとして起動し、終了時に止める。**AWS の認証情報などを渡さないよう、環境変数は `PATH` など最小限だけ引き継ぐ** (必要なものは mcp.json の `env` に書く)。Windows では `npx` などのバッチファイルも動くよう `cmd /C` 経由で、コンソールウィンドウを出さずに起動する。
 
-## AWS 構成
+## AWS 構成 (本番運用相当)
 
-サーバーは置かず、各 PC のアプリ (Rust) が AWS を直接呼びます。AWS の長期キーは PC に置きません。
+このリポジトリの AWS 構成は、検証用の簡易版ではなく**本番運用相当の構成**です。
+アプリ用のサーバーは置かず、各 PC のアプリの Rust 側だけが AWS を直接呼びます。画面 (React) はクラウドに直接つながりません。
 
-![agui-rig の AWS 構成図](docs/images/aws-architecture.png)
+![agui-rig の AWS 構成図 (本番運用相当)](docs/images/aws-architecture.png)
 
-元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。
+図の元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。
+
+本番運用相当にしている点:
+
+- **長期キーなし**: ログインした ID トークンを STS で最大 1 時間の一時認証情報に替え、自動で更新する。トークンと認証情報は Rust のメモリだけに置き、画面にも PC のファイルにも残さない
+- **最小権限**: アプリのロールは Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB や Langfuse のキーには触れない
+- **利用者の分離**: 履歴と利用料金は API Gateway の JWT オーソライザーが検証した `sub` だけで分けるので、ほかの人のデータに届かない
+- **監査とコスト**: 誰がいつ呼んだかは CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額の正は Cost Explorer、利用者別・会話別の内訳は Langfuse
+- **可観測性**: トレースは ID トークンを検証する OTel Collector 経由で、セルフホストの Langfuse に送る
+- **IaC**: AWS のリソースは `infra/terraform/` の Terraform で作る (下の「AWS 側の準備」)
 
 <details>
 <summary>同じ図の Mermaid 版 (テキストで直すとき用)</summary>
@@ -111,12 +121,12 @@ flowchart LR
   APIGW -. "JWKS で検証" .-> IdP
   APIGW -- "/threads (sub)" --> History
   History -- "sub ごとに読み書き" --> DDB
-  APIGW -- "/usage (sub)" --> Usage["Lambda (VPC)<br/>利用料金"]
+  APIGW -- "⑥ /usage (sub)" --> Usage["Lambda (VPC)<br/>利用料金"]
   Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
   Usage -- "上限を読む / sub・利用者名・料金を記録" --> Limits[("DynamoDB<br/>利用上限")]
   Admin["管理者<br/>npm run limits"] -- "上限の設定・手動リセット (AWS 認証情報)" --> Limits
-  App -- "⑥ OTLP/HTTP (ID トークン)" --> Collector
+  App -- "⑦ OTLP/HTTP (ID トークン)" --> Collector
   Collector -. "JWKS で検証" .-> IdP
   Collector --> Langfuse
 ```
@@ -130,12 +140,13 @@ flowchart LR
 | ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
 | ⑤ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (API Gateway の JWT オーソライザー) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
-| ⑤' アプリ → API Gateway → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。Langfuse のキーは Lambda だけが持つ。Lambda は利用上限のテーブルを読み、`sub`・利用者名・最新の料金を記録する |
+| ⑥ アプリ → API Gateway → Lambda (VPC 内) → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。Langfuse のキーは Secrets Manager に置き、Lambda だけが読む。Lambda は利用上限のテーブルを読み、`sub`・利用者名・最新の料金を記録する |
+| ⑦ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
 | 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`npm run limits`)。利用者からは変えられない |
-| ⑥ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
+
+番号は上の図の番号と同じです。
 
 - PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
-- 利用の記録は CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額は Cost Explorer で確認します。
 - 履歴を API Gateway 経由にしているのは、JWT オーソライザーが ID トークンを検証して `sub` を Lambda に渡すので、利用者を偽れないためです
   (アプリが一時認証情報で DynamoDB を直接読み書きすると、ほかの人の項目に届かないようにするのが難しい)。
   このため、アプリのロールに DynamoDB の権限は要りません。
