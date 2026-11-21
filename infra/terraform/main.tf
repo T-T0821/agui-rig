@@ -49,8 +49,8 @@ resource "aws_apigatewayv2_authorizer" "id_token" {
   identity_sources = ["$request.header.Authorization"]
 
   jwt_configuration {
-    issuer   = var.oidc_issuer
-    audience = [var.oidc_client_id]
+    issuer   = local.oidc_issuer
+    audience = [local.oidc_client_id]
   }
 }
 

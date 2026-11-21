@@ -10,21 +10,42 @@ variable "name" {
   default     = "agui-rig"
 }
 
-# ---- Auth0 ----
+# ---- ログイン (OpenID Connect) ----
+# 本番は Auth0 (oidc_issuer と oidc_client_id を指定)。開発は create_cognito = true で Cognito のユーザープールを作って使える
 
 variable "oidc_issuer" {
-  description = "Auth0 の issuer (例 https://your-tenant.auth0.com/)。ID トークンの iss と末尾の / まで完全に一致させる"
+  description = "Auth0 の issuer (例 https://your-tenant.auth0.com/)。ID トークンの iss と末尾の / まで完全に一致させる。create_cognito = true なら空にする"
   type        = string
+  default     = ""
 
   validation {
-    condition     = startswith(var.oidc_issuer, "https://")
+    condition     = var.oidc_issuer == "" || startswith(var.oidc_issuer, "https://")
     error_message = "oidc_issuer は https:// で始めてください。"
   }
 }
 
 variable "oidc_client_id" {
-  description = "Auth0 の Client ID (ID トークンの aud)"
+  description = "Auth0 の Client ID (ID トークンの aud)。create_cognito = true なら空にする"
   type        = string
+  default     = ""
+}
+
+variable "create_cognito" {
+  description = "開発用に Cognito のユーザープールとアプリクライアントを作り、Auth0 の代わりに使う"
+  type        = bool
+  default     = false
+}
+
+variable "cognito_domain_prefix" {
+  description = "Cognito のログイン画面のドメインの接頭辞 (<接頭辞>.auth.<リージョン>.amazoncognito.com)。空なら <name>-<アカウント ID>"
+  type        = string
+  default     = ""
+}
+
+variable "cognito_callback_port" {
+  description = "アプリがリダイレクトを受けるポート (アプリの OAUTH_REDIRECT_PORT と同じ値)"
+  type        = number
+  default     = 53682
 }
 
 # ---- アプリが引き受ける IAM ロール (Bedrock / AgentCore) ----

@@ -252,7 +252,11 @@ impl AuthMode {
     /// 開発ビルド: `DEV_SKIP_LOGIN=1` か OAUTH_ISSUER 未設定なら開発モード (ログインなし)。
     /// リリースビルド: 開発モードは無く、https の OAUTH_ISSUER が必須 (模擬サーバーにも向けられない)。
     fn resolve() -> Self {
-        let config = OAuthConfig::from_env();
+        let config = match OAuthConfig::from_env() {
+            Some(Err(e)) => return Self { oauth: None, dev_mode: false, error: Some(e) },
+            Some(Ok(c)) => Some(c),
+            None => None,
+        };
         if cfg!(debug_assertions) {
             let skip = std::env::var("DEV_SKIP_LOGIN").is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
             return if skip || config.is_none() {

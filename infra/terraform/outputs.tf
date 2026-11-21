@@ -16,3 +16,23 @@ output "usage_enabled" {
   description = "利用料金の機能を作ったか"
   value       = local.usage_enabled
 }
+
+output "oauth_issuer" {
+  description = "アプリの OAUTH_ISSUER に設定する (Auth0 なら入力した値、Cognito ならユーザープールの issuer)"
+  value       = local.oidc_issuer
+}
+
+output "oauth_client_id" {
+  description = "アプリの OAUTH_CLIENT_ID に設定する"
+  value       = local.oidc_client_id
+}
+
+output "cognito_login_url" {
+  description = "Cognito のログイン画面のドメイン (create_cognito = true のとき)"
+  value       = var.create_cognito ? "https://${aws_cognito_user_pool_domain.dev[0].domain}.auth.${var.region}.amazoncognito.com" : null
+}
+
+output "cognito_user_pool_id" {
+  description = "利用者を作るときに使う (aws cognito-idp admin-create-user --user-pool-id ...)"
+  value       = var.create_cognito ? aws_cognito_user_pool.dev[0].id : null
+}
