@@ -77,6 +77,8 @@ docs/images/      README の図
 
 ![agui-rig の AWS 構成図](docs/images/aws-architecture.png)
 
+元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。
+
 <details>
 <summary>同じ図の Mermaid 版 (テキストで直すとき用)</summary>
 
