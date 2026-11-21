@@ -2,7 +2,7 @@
 # Langfuse のキーは Secrets Manager にあり、この Lambda だけが読む (アプリには渡さない)。
 # Lambda はオーソライザーが検証した sub の金額だけを返す。作らなければ /usage は 404 になり、アプリは料金を出さない。
 # 利用上限: 既定値は default_monthly_limit_usd、利用者ごとの上限と手動リセットは limits テーブル (管理者が
-# app/backend の `npm run limits` で書く)。上限は毎月の月初に自動で戻る。
+# ルートの `pnpm limits` で書く)。上限は毎月の月初に自動で戻る。
 # Lambda は上限を読み、同じ項目に sub・利用者名 (検証済みの ID トークンのクレーム)・最新の料金を書く (表示用)。
 
 locals {
@@ -18,7 +18,7 @@ data "archive_file" "usage" {
   lifecycle {
     precondition {
       condition     = fileexists("${local.backend_dist}/usage.mjs")
-      error_message = "バックエンドの Lambda がビルドされていません。先に npm --prefix ../../app/backend ci && npm --prefix ../../app/backend run build を実行してください。"
+      error_message = "バックエンドの Lambda がビルドされていません。先に リポジトリのルートで pnpm install && pnpm backend:build を実行してください。"
     }
   }
 }
@@ -37,7 +37,7 @@ resource "aws_dynamodb_table" "limits" {
   }
 
   point_in_time_recovery {
-    enabled = true
+    enabled = var.point_in_time_recovery
   }
 
   server_side_encryption {

@@ -19,4 +19,12 @@ terraform {
 
 provider "aws" {
   region = var.region
+
+  # 開発者ごとの環境の消し忘れを Owner / Environment タグで探せるようにする
+  default_tags {
+    tags = merge(
+      { Project = "agui-rig", Environment = var.environment },
+      var.owner != "" ? { Owner = var.owner } : {},
+    )
+  }
 }
