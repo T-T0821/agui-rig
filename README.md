@@ -33,6 +33,7 @@ app/
   backend/        API Gateway から呼ばれる Lambda (TypeScript): チャット履歴と利用料金
 infra/
   terraform/      AWS のリソース (IAM、API Gateway、Lambda、DynamoDB)
+  dev-account/    開発用アカウントの初期設定 (開発者の権限セット、state のバケット、権限の上限)
   otel-collector.yaml   OpenTelemetry Collector の設定 (リファレンス。デプロイは Langfuse 側のリポジトリ)
 docs/images/      README の図
 ```
@@ -309,9 +310,54 @@ CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
 - **消し忘れ**: 全リソースに `Environment=dev`、`Owner=<名前>` のタグが付くので、
   `aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=dev` などで探せます
 - `--` の後ろは Terraform にそのまま渡ります (例: `pnpm dev-env up -- -auto-approve -var 'bedrock_model_arns=["..."]'`)
-- state は既定ではローカル (`infra/terraform/terraform.tfstate.d/dev-<名前>/`) です。チームで S3 などの `backend` を足せば、
-  workspace ごとに別の state になり、`list` で全員の環境が見えます
+- state は、`.env.cloud` に `DEV_ENV_STATE_BUCKET` があればチームの S3 バケットに、無ければ各自の PC
+  (`infra/terraform/terraform.tfstate.d/dev-<名前>/`) に置きます。S3 なら `list` で全員の環境が見えます
 - IAM の OIDC プロバイダーはアカウントあたり 100 個までなので、開発者がそれ以上になる場合は共用の開発環境 (上の Cognito の節) を使ってください
+
+### 開発用アカウントの準備 (管理者が一度だけ)
+
+開発者の環境はすべて、本番とは別の開発用 AWS アカウント 1 つに作ります (AWS Organizations で本番と分ける)。
+開発者は IAM Identity Center (SSO) でそのアカウントに入り、長期のアクセスキーは使いません。
+その準備を `infra/dev-account/` の Terraform で作ります:
+
+| リソース | 場所 | 内容 |
+| --- | --- | --- |
+| state のバケット | 開発用アカウント | 開発者ごとの state (`agui-rig-dev/<workspace>/...`)。バージョニング、暗号化、公開ブロック、TLS 必須。古い版は 90 日で消す。ロックは S3 のロックファイル |
+| 権限の上限 (`agui-rig-dev-boundary`) | 開発用アカウント | 開発者が作る IAM ロールに必ず付ける permissions boundary。Bedrock と Code Interpreter、`agui-rig-dev-*` のテーブル、ログだけ |
+| 権限セット (`AguiRigDeveloper`) | Identity Center | 開発者用。下の範囲だけ。`developer_group_name` のグループに、開発用アカウントで割り当てる |
+
+権限セットでできること:
+
+- `agui-rig-dev-*` の IAM ロールの作成・変更・削除。**作れるのは権限の上限を付けたロールだけ**で、上限は外せない。付けられる AWS 管理ポリシーは Lambda の実行用だけ
+- Cognito の OIDC プロバイダー、Cognito、API Gateway (HTTP API)、`agui-rig-dev-*` の Lambda と DynamoDB
+- state のバケットの読み書き、`agui-rig-dev-*` の Lambda のログの閲覧、タグでの検索
+- 自分の認証での Bedrock と Code Interpreter (`pnpm dev:aws` 用。`allow_bedrock = false` で外せる)
+
+```sh
+cd infra/dev-account
+cp terraform.tfvars.example terraform.tfvars   # 2 つのアカウントのプロファイル、開発者のグループ名
+terraform init
+terraform apply
+terraform output -raw env_cloud   # → チームの .env.cloud.example に書いて共有する
+```
+
+- Terraform 1.10 以上が要ります (S3 のロックファイル)。`pnpm dev-env` で S3 の state を使うときも同じです
+- 権限セットは IAM Identity Center を管理するアカウント (管理アカウントか委任管理者) に作るので、`identity_center_profile` はそのアカウントの管理者にします。
+  Identity Center を使わないなら `create_permission_set = false` で、バケットと権限の上限だけ作れます
+- state のバケットは `prevent_destroy` で消せないようにしてあります
+
+出力の `env_cloud` は次の 3 行です。開発者は自分の `.env.cloud` にこれを入れ、`AWS_PROFILE` には `aws configure sso` で作った
+`AguiRigDeveloper` のプロファイルを書きます:
+
+```sh
+DEV_ENV_STATE_BUCKET=agui-rig-dev-tfstate-123456789012
+DEV_ENV_STATE_REGION=ap-northeast-1
+DEV_ENV_PERMISSIONS_BOUNDARY=arn:aws:iam::123456789012:policy/agui-rig-dev-boundary
+```
+
+`pnpm dev-env` は `DEV_ENV_STATE_BUCKET` があると、`infra/terraform` の state 設定 (本番) は変えずに、実行中だけ
+S3 の backend の上書きファイル (`dev_env_backend_override.tf`) を置き、`.terraform-dev/` を使います。
+`DEV_ENV_PERMISSIONS_BOUNDARY` は Terraform の `permissions_boundary_arn` として全部の IAM ロールに付きます。
 
 ## 動かし方
 
@@ -651,6 +697,7 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 | `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限) |
 | `app/backend/scripts/limits.ts` | 管理者用 CLI (`pnpm limits`): 利用者ごとの上限と手動リセット |
 | `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
+| `infra/dev-account/` | 開発用アカウントの初期設定 (開発者の権限セット、state のバケット、権限の上限)。管理者が一度だけ apply する |
 | `infra/otel-collector.yaml` | OpenTelemetry Collector の設定のリファレンス (ID トークンで受けて Langfuse へ送る)。デプロイは Langfuse のリポジトリ |
 
 ### 開発用

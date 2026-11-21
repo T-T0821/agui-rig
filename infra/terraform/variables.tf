@@ -19,6 +19,12 @@ variable "environment" {
   default     = "prod"
 }
 
+variable "permissions_boundary_arn" {
+  description = "作る IAM ロールすべてに付ける権限の上限 (permissions boundary) のポリシー ARN。開発用アカウントでは infra/dev-account の出力。空なら付けない"
+  type        = string
+  default     = ""
+}
+
 variable "owner" {
   description = "この環境の持ち主 (全リソースの Owner タグ)。開発者ごとの環境ではユーザ名。空ならタグを付けない"
   type        = string
