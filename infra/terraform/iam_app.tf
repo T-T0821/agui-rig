@@ -47,6 +47,7 @@ resource "aws_iam_role" "app" {
   name                 = "${var.name}-app"
   description          = "agui-rig のアプリが ID トークン (Auth0 / Cognito) で引き受けるロール"
   assume_role_policy   = data.aws_iam_policy_document.app_trust.json
+  permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
   max_session_duration = 3600
 
   lifecycle {

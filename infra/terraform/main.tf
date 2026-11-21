@@ -92,8 +92,9 @@ data "archive_file" "history" {
 }
 
 resource "aws_iam_role" "history_function" {
-  name               = "${var.name}-history-function"
-  assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
+  name                 = "${var.name}-history-function"
+  assume_role_policy   = data.aws_iam_policy_document.lambda_trust.json
+  permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
 }
 
 resource "aws_iam_role_policy_attachment" "history_function_logs" {

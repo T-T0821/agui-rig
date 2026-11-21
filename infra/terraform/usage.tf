@@ -46,9 +46,10 @@ resource "aws_dynamodb_table" "limits" {
 }
 
 resource "aws_iam_role" "usage_function" {
-  count              = local.usage_enabled ? 1 : 0
-  name               = "${var.name}-usage-function"
-  assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
+  count                = local.usage_enabled ? 1 : 0
+  name                 = "${var.name}-usage-function"
+  assume_role_policy   = data.aws_iam_policy_document.lambda_trust.json
+  permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
 }
 
 resource "aws_iam_role_policy_attachment" "usage_function_vpc" {

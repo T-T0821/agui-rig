@@ -1,0 +1,18 @@
+# 開発用アカウントの初期設定。管理者が一度だけ apply する (README の「開発用アカウントの準備」)。
+region = "ap-northeast-1"
+
+# 開発用アカウントの管理者のプロファイル
+dev_account_profile = "agui-rig-dev-admin"
+
+# IAM Identity Center を管理するアカウント (管理アカウントか委任管理者) のプロファイル
+identity_center_profile = "org-identity-admin"
+# identity_center_region = "ap-northeast-1"
+
+# 権限セットを割り当てるグループ (Identity Center の表示名)。空なら権限セットだけ作る
+developer_group_name = "agui-rig-developers"
+
+# Identity Center を使わないなら false (state のバケットと権限の上限ポリシーだけ作る)
+# create_permission_set = false
+
+# 開発者が自分の認証で Bedrock を呼ぶ (pnpm dev:aws) のを禁止するなら false
+# allow_bedrock = false

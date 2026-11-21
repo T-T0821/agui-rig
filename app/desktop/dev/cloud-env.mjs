@@ -7,11 +7,12 @@
 // Cognito のユーザープール・IAM ロール・API Gateway・Lambda・DynamoDB はすべて開発者ごとに別。
 // up の後は `pnpm dev:cloud` で、本物のログイン (Cognito) つきでこの環境に向けてアプリを起動する。
 // 自分の設定はリポジトリのルートの .env.cloud (例は .env.cloud.example) に書く: DEV_ENV_USER、DEV_ENV_EMAIL、AWS_PROFILE、AWS_REGION。
+// チームの開発用アカウント (infra/dev-account) があれば DEV_ENV_STATE_BUCKET、DEV_ENV_PERMISSIONS_BOUNDARY も書く。
 // up はできた環境の接続先 (OAUTH_ISSUER など) を同じファイルに書き足し、down で消す。`pnpm dev:cloud` はこのファイルを読む。
 // 必要なもの: terraform (1.6 以上)、aws CLI、AWS の認証 (AWS_PROFILE / aws sso login など。IAM・Cognito・Lambda などを作れる権限)
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,35 @@ const tfDir = join(repo, "infra", "terraform");
 const backendDir = join(repo, "app", "backend");
 // .env.cloud の値 (AWS_PROFILE など) を、terraform と aws CLI にも渡るよう process.env に入れる
 loadCloudEnv();
+
+// チームの state バケット (infra/dev-account の出力)。あれば workspace ごとの state を S3 に置く。
+// infra/terraform 自体の state 設定 (本番) は変えず、この実行のあいだだけ backend の上書きファイルを置く。
+// .terraform も別のフォルダ (.terraform-dev) を使い、手で実行する terraform とは混ざらないようにする。
+const stateBucket = process.env.DEV_ENV_STATE_BUCKET;
+const backendOverride = join(tfDir, "dev_env_backend_override.tf");
+if (stateBucket) {
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(stateBucket)) fail(`DEV_ENV_STATE_BUCKET が S3 のバケット名ではありません: ${stateBucket}`);
+  const stateRegion = process.env.DEV_ENV_STATE_REGION || process.env.AWS_REGION || "ap-northeast-1";
+  process.env.TF_DATA_DIR = join(tfDir, ".terraform-dev");
+  writeFileSync(
+    backendOverride,
+    `# pnpm dev-env が実行中だけ置くファイル (git には入れない)
+terraform {
+  backend "s3" {
+    bucket               = "${stateBucket}"
+    key                  = "agui-rig/dev.tfstate"
+    workspace_key_prefix = "agui-rig-dev"
+    region               = "${stateRegion}"
+    encrypt              = true
+    use_lockfile         = true
+  }
+}
+`,
+  );
+  process.on("exit", () => rmSync(backendOverride, { force: true }));
+  // Ctrl+C は terraform 側で受けて止まるので、こちらは終わるのを待ってから上書きファイルを消す
+  process.on("SIGINT", () => {});
+}
 const isWindows = process.platform === "win32";
 
 /** 引数を `--key value` と、`--` の後ろ (Terraform にそのまま渡す) に分ける。 */
@@ -95,11 +125,13 @@ function stackVars(user, region) {
     `-var=owner=${user}`,
     // 使い捨てなので PITR は切る。利用料金 (Langfuse・VPC が要る) は作らない
     "-var=point_in_time_recovery=false",
+    // 開発用アカウントの権限セットは、権限の上限つきのロールしか作れない (infra/dev-account)
+    ...(process.env.DEV_ENV_PERMISSIONS_BOUNDARY ? [`-var=permissions_boundary_arn=${process.env.DEV_ENV_PERMISSIONS_BOUNDARY}`] : []),
   ];
 }
 
 function ensureInit() {
-  if (!existsSync(join(tfDir, ".terraform"))) terraform(["init", "-input=false"]);
+  if (!existsSync(process.env.TF_DATA_DIR || join(tfDir, ".terraform"))) terraform(["init", "-input=false"]);
 }
 
 function currentWorkspace() {

@@ -3,16 +3,19 @@ name: terraform
 on:
   push:
     branches: [main]
-    paths: ["infra/terraform/**", "app/backend/**", "pnpm-lock.yaml", ".github/workflows/terraform.yml"]
+    paths: ["infra/terraform/**", "infra/dev-account/**", "app/backend/**", "pnpm-lock.yaml", ".github/workflows/terraform.yml"]
   pull_request:
-    paths: ["infra/terraform/**", "app/backend/**", "pnpm-lock.yaml", ".github/workflows/terraform.yml"]
+    paths: ["infra/terraform/**", "infra/dev-account/**", "app/backend/**", "pnpm-lock.yaml", ".github/workflows/terraform.yml"]
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [infra/terraform, infra/dev-account]
     defaults:
       run:
-        working-directory: infra/terraform
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@v4
 
