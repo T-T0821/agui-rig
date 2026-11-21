@@ -1,0 +1,62 @@
+name: e2e
+
+# 開発ビルドのアプリを、模擬サーバー (dev/mock-server.mjs) に向けて tauri-driver で操作する。
+# スクリーンショットと録画は成果物 (e2e-artifacts) に残す。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/desktop/package-lock.json
+            app/desktop/e2e/package-lock.json
+            app/desktop/examples/time-mcp/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/desktop/src-tauri
+          key: e2e
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev \
+            webkit2gtk-driver xvfb ffmpeg fonts-noto-cjk
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Build app (debug, no bundle)
+        working-directory: app/desktop
+        run: |
+          npm ci
+          npx tauri build --debug --no-bundle
+
+      - name: Install E2E dependencies
+        run: |
+          npm ci --prefix app/desktop/examples/time-mcp
+          npm ci --prefix app/desktop/e2e
+
+      - name: Run E2E tests
+        working-directory: app/desktop/e2e
+        run: xvfb-run -a -s "-screen 0 1280x800x24" npm test
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-artifacts
+          path: app/desktop/e2e/artifacts
+          if-no-files-found: ignore

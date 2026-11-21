@@ -50,6 +50,8 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
   const threads = new Map();
   /** 模擬の利用料金 (Bedrock の模擬応答のトークン数 × 例の単価)。本物は Langfuse が計算する */
   let mockCostUsd = 0;
+  /** E2E テストなどから変える利用上限 (PUT /__mock/config)。null なら MOCK_MONTHLY_LIMIT_USD を使う */
+  let limitOverride = null;
   const keyOf = (req) => (req.headers.authorization ?? "").match(/Credential=(\w+)/)?.[1];
 
   const server = createServer(async (req, res) => {
@@ -60,6 +62,14 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(obj));
     };
+
+    // ---- 模擬サーバー自身の設定 (E2E テスト用) ----
+    if (url.pathname === "/__mock/config" && req.method === "PUT") {
+      const b = JSON.parse(text || "{}");
+      if ("monthlyLimitUsd" in b) limitOverride = b.monthlyLimitUsd;
+      log("設定を変更:", JSON.stringify(b));
+      return json({ monthlyLimitUsd: limitOverride });
+    }
 
     // ---- Auth0 (OIDC) ----
     if (url.pathname === "/.well-known/openid-configuration") {
@@ -217,7 +227,7 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
           const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
           const monthUsd = mockCostUsd + 1.234;
           // 利用上限の模擬: MOCK_MONTHLY_LIMIT_USD (例 1.24 にすると数回のやり取りで上限に達する)。未設定なら上限なし
-          const limit = Number(process.env.MOCK_MONTHLY_LIMIT_USD ?? 0);
+          const limit = Number(limitOverride ?? process.env.MOCK_MONTHLY_LIMIT_USD ?? 0);
           const limitUsd = limit > 0 ? limit : null;
           const blocked = limitUsd !== null && monthUsd >= limitUsd;
           const warn = limitUsd !== null && monthUsd >= limitUsd * 0.8;

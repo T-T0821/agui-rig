@@ -342,6 +342,32 @@ ANTHROPIC_API_KEY=...
 `MOCK_MONTHLY_LIMIT_USD=1.24 npm run dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
 
+### E2E テスト (模擬環境)
+
+`app/desktop/e2e/` に、開発ビルドのアプリを [tauri-driver](https://v2.tauri.app/develop/tests/webdriver/) (WebDriver) で操作する E2E テストがあります。
+`npm run dev:mock` と同じ模擬サーバーに向けて、次の流れを確かめます。
+
+1. ログイン画面から模擬の Auth0 でログインする (ブラウザの代わりに、認可 URL のリダイレクトをたどるだけの `xdg-open` を使う)
+2. メッセージを送り、MCP の時刻ツール → Code Interpreter → 回答 まで表示される
+3. 会話が履歴に保存され、「新しい会話」から戻って開き直せる
+4. 利用料金がヘッダーに出て、上限に近づくと警告、達すると送れない (上限は模擬サーバーの `PUT /__mock/config` で切り替える)
+
+```sh
+# Linux (Ubuntu) の例。Tauri の前提パッケージに加えて WebKitWebDriver と Xvfb が要る
+sudo apt-get install -y webkit2gtk-driver xvfb ffmpeg fonts-noto-cjk
+cargo install tauri-driver --locked
+
+cd app/desktop
+npm ci && npx tauri build --debug --no-bundle
+npm ci --prefix examples/time-mcp
+cd e2e && npm ci
+xvfb-run -a -s "-screen 0 1280x800x24" npm test
+```
+
+スクリーンショットと録画 (ffmpeg があるとき) は `app/desktop/e2e/artifacts/` に出ます。
+CI (`.github/workflows/e2e.yml`) でも Ubuntu で動かし、成果物 `e2e-artifacts` に残します。
+macOS には WebDriver が無いため、tauri-driver の E2E は Linux と Windows だけで動きます。
+
 ## トレースと利用料金 (Langfuse)
 
 Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
@@ -577,6 +603,9 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | --- | --- |
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
 | `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
+| `app/desktop/dev/mock-env.mjs` | アプリを模擬サーバーに向ける環境変数 (`dev:mock` と E2E テストで共通) |
+| `app/desktop/e2e/` | E2E テスト (tauri-driver + WebdriverIO、模擬環境) |
+| `.github/workflows/e2e.yml` | E2E テストの CI |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足
