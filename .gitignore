@@ -4,4 +4,5 @@ app/desktop/src-tauri/target
 app/desktop/src-tauri/gen
 .env
 mcp.json
+app/desktop/e2e/artifacts
 .env.cloud

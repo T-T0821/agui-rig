@@ -2,6 +2,7 @@
 packages:
   - app/desktop
   - app/desktop/examples/time-mcp
+  - app/desktop/e2e
   - app/backend
 
 # インストール時にスクリプトを実行してよい依存 (pnpm 10 は既定で止める)
@@ -11,3 +12,6 @@ onlyBuiltDependencies:
 # 利用状況の送信だけのスクリプトなので実行しない
 ignoredBuiltDependencies:
   - "@scarf/scarf"
+  # WebdriverIO が他のブラウザ用に持つドライバーのダウンロード。E2E は tauri-driver を使うので要らない
+  - edgedriver
+  - geckodriver
