@@ -10,6 +10,16 @@ export function subOf(event: Event): string | undefined {
   return typeof sub === "string" && sub !== "" ? sub : undefined;
 }
 
+/** 検証済みの ID トークンにある利用者名 (表示用)。Auth0 は name / nickname、Cognito は cognito:username。無ければメール */
+export function userNameOf(event: Event): string | undefined {
+  const claims = event.requestContext.authorizer?.jwt?.claims ?? {};
+  for (const key of ["name", "nickname", "cognito:username", "preferred_username", "email"]) {
+    const v = claims[key];
+    if (typeof v === "string" && v.trim() !== "") return v.trim().slice(0, 200);
+  }
+  return undefined;
+}
+
 export function json(statusCode: number, body: unknown): Result {
   return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }

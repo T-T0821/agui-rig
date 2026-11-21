@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handler, parseSaveBody } from "../src/history.ts";
+import { userNameOf } from "../src/http.ts";
 import { evaluate, periodStartOf, periodStarts, resolveLimit } from "../src/usage.ts";
 
 test("PUT の本文を確かめる", () => {
@@ -49,4 +50,12 @@ test("上限との比較", () => {
   assert.deepEqual(evaluate(7, 10, 0.8), { warn: false, blocked: false });
   assert.deepEqual(evaluate(8, 10, 0.8), { warn: true, blocked: false });
   assert.deepEqual(evaluate(10, 10, 0.8), { warn: true, blocked: true });
+});
+
+test("利用者名は検証済みのクレームから", () => {
+  const ev = (claims: Record<string, unknown>) => ({ requestContext: { authorizer: { jwt: { claims } } } }) as never;
+  assert.equal(userNameOf(ev({ sub: "a", name: "山田 太郎", email: "t@example.com" })), "山田 太郎");
+  assert.equal(userNameOf(ev({ sub: "a", "cognito:username": "taro" })), "taro");
+  assert.equal(userNameOf(ev({ sub: "a", email: "t@example.com" })), "t@example.com");
+  assert.equal(userNameOf(ev({ sub: "a", name: "  " })), undefined);
 });

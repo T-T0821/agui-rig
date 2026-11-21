@@ -2,7 +2,8 @@
 # Langfuse のキーは Secrets Manager にあり、この Lambda だけが読む (アプリには渡さない)。
 # Lambda はオーソライザーが検証した sub の金額だけを返す。作らなければ /usage は 404 になり、アプリは料金を出さない。
 # 利用上限: 既定値は default_monthly_limit_usd、利用者ごとの上限と手動リセットは limits テーブル (管理者が
-# app/backend の `npm run limits` で書く)。Lambda は読むだけ。上限は毎月の月初に自動で戻る。
+# app/backend の `npm run limits` で書く)。上限は毎月の月初に自動で戻る。
+# Lambda は上限を読み、同じ項目に sub・利用者名 (検証済みの ID トークンのクレーム)・最新の料金を書く (表示用)。
 
 locals {
   usage_enabled = var.langfuse_secret_arn != ""
@@ -22,7 +23,8 @@ data "archive_file" "usage" {
   }
 }
 
-# pk = 利用者の sub。monthlyLimitUsd (0 = 上限なし)、resetAt (手動リセットの時刻)
+# pk = 利用者の sub。管理者: monthlyLimitUsd (0 = 上限なし)、resetAt (手動リセットの時刻)
+# Lambda: userName、lastSeenAt、monthUsd、periodUsd、limitUsd、blocked
 resource "aws_dynamodb_table" "limits" {
   count        = local.usage_enabled ? 1 : 0
   name         = "${var.name}-usage-limits"
@@ -71,13 +73,13 @@ resource "aws_iam_role_policy" "usage_function_secret" {
 
 resource "aws_iam_role_policy" "usage_function_limits" {
   count = local.usage_enabled ? 1 : 0
-  name  = "usage-limits-read"
+  name  = "usage-limits"
   role  = aws_iam_role.usage_function[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Allow"
-      Action   = "dynamodb:GetItem"
+      Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
       Resource = aws_dynamodb_table.limits[0].arn
     }]
   })

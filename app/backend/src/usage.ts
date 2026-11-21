@@ -4,11 +4,13 @@
 // 利用上限は DynamoDB (LIMITS_TABLE) の利用者ごとの設定、無ければ DEFAULT_MONTHLY_LIMIT_USD。
 // 上限は月ごと (UTC_OFFSET_MINUTES の月初) に自動で戻り、管理者が resetAt を入れるとその時点から数え直す
 // (scripts/limits.ts)。
+// 呼ばれるたびに、同じテーブルへ sub・利用者名 (検証済みの ID トークンのクレーム)・最新の料金を書く
+// (管理者が一覧で誰がいくら使っているかを見られるように)。
 // @aws-sdk/* は Lambda の Node.js ランタイムに入っているので、まとめずに外から読む。
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
-import { type Event, type Result, error, json, subOf } from "./http.ts";
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { type Event, type Result, error, json, subOf, userNameOf } from "./http.ts";
 
 /** 応答 */
 export type Usage = {
@@ -29,10 +31,19 @@ export type Usage = {
 
 /** 利用上限テーブルの項目 (pk = sub) */
 export type LimitItem = {
-  /** 月の上限 (USD)。0 は上限なし。無ければ既定値 */
+  /** 月の上限 (USD)。0 は上限なし。無ければ既定値。管理者が書く */
   monthlyLimitUsd?: number;
-  /** 手動リセットの時刻 (ISO 8601)。今月のものなら、ここから数え直す */
+  /** 手動リセットの時刻 (ISO 8601)。今月のものなら、ここから数え直す。管理者が書く */
   resetAt?: string;
+  // ---- 以下は Lambda が /usage のたびに書く (表示用) ----
+  /** 利用者名 (ID トークンの name など) */
+  userName?: string;
+  /** 最後に /usage を呼んだ時刻 */
+  lastSeenAt?: string;
+  monthUsd?: number;
+  periodUsd?: number;
+  limitUsd?: number | null;
+  blocked?: boolean;
 };
 
 /** Langfuse の /api/public/metrics/daily の応答 (使う所だけ) */
@@ -103,6 +114,29 @@ async function limitItem(sub: string): Promise<LimitItem> {
   return (out.Item ?? {}) as LimitItem;
 }
 
+/** sub・利用者名・最新の料金を書く。上限とリセット (管理者の設定) には触らない。失敗しても応答は返す */
+async function recordUsage(sub: string, userName: string | undefined, usage: Usage): Promise<void> {
+  const table = process.env.LIMITS_TABLE;
+  if (!table) return;
+  const values: Record<string, unknown> = {
+    ":seen": new Date().toISOString(),
+    ":month": usage.monthUsd,
+    ":period": usage.periodUsd,
+    ":limit": usage.limitUsd,
+    ":blocked": usage.blocked,
+  };
+  let set = "lastSeenAt = :seen, monthUsd = :month, periodUsd = :period, limitUsd = :limit, blocked = :blocked";
+  if (userName) {
+    set += ", userName = :name";
+    values[":name"] = userName;
+  }
+  try {
+    await db.send(new UpdateCommand({ TableName: table, Key: { pk: sub }, UpdateExpression: `SET ${set}`, ExpressionAttributeValues: values }));
+  } catch (e) {
+    console.warn("利用状況を記録できません", e);
+  }
+}
+
 /** 上限の金額 (USD)。利用者の設定 → 既定値。0 以下や数でないものは上限なし (null) */
 export function resolveLimit(item: LimitItem, defaultLimitUsd: number): number | null {
   const v = typeof item.monthlyLimitUsd === "number" ? item.monthlyLimitUsd : defaultLimitUsd;
@@ -146,5 +180,6 @@ export async function handler(event: Event): Promise<Result> {
     periodUsd,
     ...evaluate(periodUsd, limitUsd, Number(process.env.LIMIT_WARN_RATIO ?? 0.8)),
   };
+  await recordUsage(sub, userNameOf(event), usage);
   return json(200, usage);
 }

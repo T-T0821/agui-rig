@@ -114,6 +114,8 @@ flowchart LR
   APIGW -- "/usage (sub)" --> Usage["Lambda (VPC)<br/>利用料金"]
   Usage -- "キー" --> Secrets["Secrets Manager"]
   Usage -- "集計 API" --> Langfuse
+  Usage -- "上限を読む / sub・利用者名・料金を記録" --> Limits[("DynamoDB<br/>利用上限")]
+  Admin["管理者<br/>npm run limits"] -- "上限の設定・手動リセット (AWS 認証情報)" --> Limits
   App -- "⑥ OTLP/HTTP (ID トークン)" --> Collector
   Collector -. "JWKS で検証" .-> IdP
   Collector --> Langfuse
@@ -128,7 +130,8 @@ flowchart LR
 | ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
 | ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
 | ⑤ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (API Gateway の JWT オーソライザー) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
-| ⑤' アプリ → API Gateway → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月)。Langfuse のキーは Lambda だけが持つ |
+| ⑤' アプリ → API Gateway → Lambda → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。Langfuse のキーは Lambda だけが持つ。Lambda は利用上限のテーブルを読み、`sub`・利用者名・最新の料金を記録する |
+| 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`npm run limits`)。利用者からは変えられない |
 | ⑥ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
 
 - PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
@@ -204,7 +207,7 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 | API Gateway (HTTP API) | JWT オーソライザー (Auth0 の ID トークンの署名・`iss`・`aud`・期限を検証)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
 | チャット履歴の Lambda | `app/backend/src/history.ts`。DynamoDB の読み書きだけの権限 |
 | 利用料金の Lambda (任意) | `app/backend/src/usage.ts`。`langfuse_secret_arn` を指定したときだけ作る (作らなければ `/usage` は 404 で、画面にも出ない) |
-| 利用上限の DynamoDB テーブル (任意) | 利用料金と一緒に作る。`pk` = 利用者の `sub`、利用者ごとの上限と手動リセットの時刻。Lambda は読むだけ、書くのは管理者だけ |
+| 利用上限の DynamoDB テーブル (任意) | 利用料金と一緒に作る。`pk` = 利用者の `sub`。上限と手動リセットの時刻は管理者だけが書き、利用者名と最新の料金は Lambda が書く |
 
 ```sh
 cd infra/terraform
@@ -389,6 +392,7 @@ npm run limits -- list
 ```
 
 - `<sub>` は ID トークンの `sub` (Auth0 の user_id)。Langfuse の User ID と同じです
+- アプリが `/usage` を呼ぶたびに、Lambda が同じテーブルへ `sub`・利用者名・最新の料金 (`monthUsd`、`periodUsd`、`limitUsd`、`blocked`、`lastSeenAt`) を書きます。利用者名は検証済みの ID トークンの `name` (無ければ `nickname`、`cognito:username`、`email`) で、アプリから送られた値は使いません。`npm run limits -- list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
 - **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。Lambda が「月初からの料金」と上限を比べるだけなので、定期実行のジョブはありません
 - **手動リセット**: `reset` で `resetAt` に今の時刻が入り、今月はその時刻からの料金で比べます。翌月になると自然に月初からに戻ります
 - アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます (結果は 30 秒使い回し、上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます)。ヘッダーに「上限 $使用 / $上限」を、上限に近づくと警告、達すると赤い案内を出します
