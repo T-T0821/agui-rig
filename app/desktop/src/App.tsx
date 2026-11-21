@@ -6,6 +6,7 @@ import "@copilotkit/react-core/v2/styles.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  CircleAlert,
   CircleUser,
   Loader2,
   LogIn,
@@ -31,7 +32,17 @@ type AgentEndpoint = { url: string; token: string };
 type AuthStatus = { authRequired: boolean; loggedIn: boolean; user: string | null };
 type ThreadSummary = { id: string; title: string; updatedAt: string };
 type ThreadList = { enabled: boolean; threads: ThreadSummary[] };
-type Usage = { todayUsd: number; monthUsd: number; monthStart: string };
+/** 利用料金と利用上限 (上限は管理者が決める。古いバックエンドでは上限まわりが無い) */
+type Usage = {
+  todayUsd: number;
+  monthUsd: number;
+  monthStart: string;
+  limitUsd?: number | null;
+  periodStart?: string | null;
+  periodUsd?: number;
+  warn?: boolean;
+  blocked?: boolean;
+};
 
 const usd = (v: number) => (v > 0 && v < 0.01 ? "< $0.01" : `$${v < 10 ? v.toFixed(2) : v.toFixed(1)}`);
 /** 表示中の会話。切り替えるときは agent ごと作り直す */
@@ -216,13 +227,35 @@ export default function App() {
               {usage && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Badge variant="outline" className="gap-1.5 font-normal">
+                    <Badge
+                      variant={usage.blocked ? "destructive" : "outline"}
+                      className={cn(
+                        "gap-1.5 font-normal",
+                        usage.warn && !usage.blocked && "border-amber-500/60 text-amber-700 dark:text-amber-400",
+                      )}
+                    >
                       <Wallet />
                       今日 {usd(usage.todayUsd)} · 今月 {usd(usage.monthUsd)}
+                      {usage.limitUsd != null && (
+                        <>
+                          {" "}
+                          · 上限 {usd(usage.periodUsd ?? usage.monthUsd)} / {usd(usage.limitUsd)}
+                        </>
+                      )}
                     </Badge>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-64">
+                  <TooltipContent side="bottom" className="max-w-72">
                     Langfuse が計算した推定額です ({new Date(usage.monthStart).toLocaleDateString()} から)。請求額は AWS 側が正です。
+                    {usage.limitUsd != null && (
+                      <>
+                        <br />
+                        月の利用上限は管理者が設定しています。毎月 1 日に自動でリセットされます
+                        {usage.periodStart && usage.periodStart !== usage.monthStart
+                          ? ` (今月は ${new Date(usage.periodStart).toLocaleString()} に管理者がリセット)`
+                          : ""}
+                        。
+                      </>
+                    )}
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -295,12 +328,32 @@ export default function App() {
                 </ScrollArea>
               </nav>
             )}
-            <main className="min-w-0 flex-1">
-              <CopilotChat
-                agentId="default"
-                threadId={conversation.threadId}
-                labels={{ chatInputPlaceholder: "メッセージを入力…" }}
-              />
+            <main className="flex min-w-0 flex-1 flex-col">
+              {usage?.blocked && (
+                <div
+                  role="alert"
+                  className="border-destructive/30 bg-destructive/10 text-destructive flex shrink-0 items-start gap-2 border-b px-4 py-2 text-sm"
+                >
+                  <CircleAlert className="mt-0.5 size-4 shrink-0" />
+                  <span>
+                    今月の利用上限 ({usd(usage.limitUsd ?? 0)}) に達したため、新しいメッセージは送れません。
+                    毎月 1 日に自動でリセットされます。急ぎの場合は管理者に上限の変更かリセットを依頼してください。
+                  </span>
+                </div>
+              )}
+              {usage?.warn && !usage.blocked && (
+                <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-800 dark:text-amber-300">
+                  <CircleAlert className="size-4 shrink-0" />
+                  今月の利用上限 ({usd(usage.limitUsd ?? 0)}) に近づいています (使用 {usd(usage.periodUsd ?? 0)})。
+                </div>
+              )}
+              <div className="min-h-0 flex-1">
+                <CopilotChat
+                  agentId="default"
+                  threadId={conversation.threadId}
+                  labels={{ chatInputPlaceholder: "メッセージを入力…" }}
+                />
+              </div>
             </main>
           </div>
         </div>

@@ -27,3 +27,8 @@ oidc_client_id = "your-client-id"
 # langfuse_host             = "http://internal-langfuse-123456.ap-northeast-1.elb.amazonaws.com"
 # lambda_subnet_ids         = ["subnet-aaaa", "subnet-bbbb"]
 # lambda_security_group_ids = ["sg-cccc"]
+
+# 利用上限 (利用料金を作ったときだけ)。1 人あたりの月の上限 USD、0 なら上限なし。
+# 個別の上限・手動リセットは app/backend で LIMITS_TABLE=$(terraform output -raw limits_table_name) npm run limits -- ...
+# default_monthly_limit_usd = 30
+# limit_warn_ratio          = 0.8

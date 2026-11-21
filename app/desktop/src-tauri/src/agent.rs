@@ -112,6 +112,17 @@ pub async fn run(runtime: &Runtime, input: RunAgentInput, emit: impl Fn(Event)) 
     }
 
     emit(Event::RunStarted { thread_id: input.thread_id.clone(), run_id: input.run_id.clone() });
+
+    // 利用上限 (管理者が決める) に達していれば、モデルを呼ばずに止める。会話も保存しない
+    if let Some(history) = &runtime.history
+        && let Err(message) = history.check_limit().instrument(span.clone()).await
+    {
+        span.record("langfuse.observation.level", "WARNING");
+        span.record("langfuse.observation.status_message", "利用上限に達しています");
+        emit(Event::RunError { message });
+        return;
+    }
+
     let mut produced = Vec::new();
     let result = run_loop(runtime, &input, &emit, &mut produced).instrument(span.clone()).await;
 

@@ -17,6 +17,11 @@ output "usage_enabled" {
   value       = local.usage_enabled
 }
 
+output "limits_table_name" {
+  description = "利用上限のテーブル (app/backend の npm run limits の LIMITS_TABLE)。利用料金を作らなければ null"
+  value       = local.usage_enabled ? aws_dynamodb_table.limits[0].name : null
+}
+
 output "oauth_issuer" {
   description = "アプリの OAUTH_ISSUER に設定する (Auth0 なら入力した値、Cognito ならユーザープールの issuer)"
   value       = local.oidc_issuer

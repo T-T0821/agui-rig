@@ -91,7 +91,7 @@ variable "langfuse_host" {
 }
 
 variable "lambda_subnet_ids" {
-  description = "Lambda を置くサブネット。Langfuse (EKS) と Secrets Manager (VPC エンドポイントか NAT) に届くこと"
+  description = "Lambda を置くサブネット。Langfuse (EKS)、Secrets Manager と DynamoDB (VPC エンドポイントか NAT) に届くこと"
   type        = list(string)
   default     = []
 }
@@ -106,6 +106,28 @@ variable "utc_offset_minutes" {
   description = "「今日」「今月」の区切りに使うタイムゾーン (分)。日本は 540"
   type        = number
   default     = 540
+}
+
+variable "default_monthly_limit_usd" {
+  description = "利用者 1 人あたりの月の利用上限 (USD、Langfuse の推定額)。0 なら上限なし。利用者ごとの上書きは npm run limits"
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.default_monthly_limit_usd >= 0
+    error_message = "default_monthly_limit_usd は 0 以上にしてください。"
+  }
+}
+
+variable "limit_warn_ratio" {
+  description = "上限のこの割合を使ったら画面で警告する"
+  type        = number
+  default     = 0.8
+
+  validation {
+    condition     = var.limit_warn_ratio > 0 && var.limit_warn_ratio <= 1
+    error_message = "limit_warn_ratio は 0 より大きく 1 以下にしてください。"
+  }
 }
 
 # ---- API Gateway ----

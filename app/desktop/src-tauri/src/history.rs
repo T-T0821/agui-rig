@@ -6,12 +6,14 @@
 //! API は `infra/terraform`、Lambda のコードは `app/backend` にある。
 //!
 //! - `GET /threads` / `GET /threads/{id}` / `PUT /threads/{id}` / `DELETE /threads/{id}`
-//! - `GET /usage` (利用料金。作っていなければ 404)
+//! - `GET /usage` (利用料金と利用上限の状態。作っていなければ 404)
 //!
 //! 会話 1 件 = DynamoDB の 1 項目。メッセージ (AG-UI の形の JSON 配列) は gzip + base64 にして
 //! 1 つの属性に入れる (項目の上限 400KB に収まるよう、大きすぎるツールの出力は切り詰める)。
 
 use std::io::{Read, Write};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use flate2::Compression;
@@ -25,10 +27,16 @@ use crate::aws::IdToken;
 /// gzip + base64 後の上限 (DynamoDB の項目の上限 400KB から、ほかの属性の分を引いた値)。
 const MAX_ENCODED_BYTES: usize = 350_000;
 
+/// 上限の確認で、前回の `/usage` の結果を使い回す時間。上限に達しているときは毎回確かめ直す
+/// (管理者のリセットをすぐ反映するため)。
+const LIMIT_CHECK_TTL: Duration = Duration::from_secs(30);
+
 pub struct History {
     http: reqwest::Client,
     url: String,
     token: IdToken,
+    /// 最後に読んだ利用料金 (上限の確認用)
+    last_usage: Mutex<Option<(Instant, Usage)>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,13 +47,41 @@ pub struct ThreadSummary {
     pub updated_at: String,
 }
 
-/// 利用料金 (Langfuse が計算したもの、USD)。
-#[derive(Serialize, Deserialize)]
+/// 利用料金 (Langfuse が計算したもの、USD) と利用上限の状態。
+/// 上限まわりは古いバックエンドでは返らないので、無ければ「上限なし」として読む。
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub today_usd: f64,
     pub month_usd: f64,
     pub month_start: String,
+    /// 今月の上限 (USD)。上限なしなら None。上限は管理者が決める
+    #[serde(default)]
+    pub limit_usd: Option<f64>,
+    /// 上限の集計の始まり (月初、または管理者が手動でリセットした時刻)
+    #[serde(default)]
+    pub period_start: Option<String>,
+    /// period_start からの料金 (上限と比べる金額)
+    #[serde(default)]
+    pub period_usd: f64,
+    #[serde(default)]
+    pub warn: bool,
+    #[serde(default)]
+    pub blocked: bool,
+}
+
+impl Usage {
+    /// 上限に達しているときの、画面に出す文言。
+    fn blocked_message(&self) -> Option<String> {
+        if !self.blocked {
+            return None;
+        }
+        let limit = self.limit_usd.map(|l| format!(" (${l:.2})")).unwrap_or_default();
+        Some(format!(
+            "今月の利用上限{limit}に達したため、新しいメッセージを送れません。\
+             上限は毎月 1 日に自動でリセットされます。急ぎの場合は管理者に上限の変更かリセットを依頼してください。"
+        ))
+    }
 }
 
 /// 会話のタイトル: 最初の利用者メッセージの先頭 40 文字。
@@ -108,7 +144,7 @@ fn decode(data: &str) -> Result<Vec<Value>, String> {
 
 impl History {
     pub fn new(url: String, token: IdToken) -> Self {
-        Self { http: reqwest::Client::new(), url, token }
+        Self { http: reqwest::Client::new(), url, token, last_usage: Mutex::new(None) }
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -169,9 +205,33 @@ impl History {
 
     /// 自分の利用料金。バックエンドで利用料金の機能を作っていなければ None。
     pub async fn usage(&self) -> Result<Option<Usage>, String> {
-        match self.call(reqwest::Method::GET, "/usage", None).await? {
-            Some(data) => serde_json::from_value(data).map(Some).map_err(|e| e.to_string()),
-            None => Ok(None),
+        let usage: Option<Usage> = match self.call(reqwest::Method::GET, "/usage", None).await? {
+            Some(data) => Some(serde_json::from_value(data).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        if let Some(u) = &usage {
+            *self.last_usage.lock().unwrap() = Some((Instant::now(), u.clone()));
+        }
+        Ok(usage)
+    }
+
+    /// 実行の前に、利用上限に達していないか確かめる。達していれば画面に出す文言を Err で返す。
+    /// 利用料金の機能が無い (404) とき、または確かめられない (Langfuse の障害など) ときは止めない。
+    pub async fn check_limit(&self) -> Result<(), String> {
+        let cached = self.last_usage.lock().unwrap().clone();
+        let usage = match cached {
+            Some((at, u)) if !u.blocked && at.elapsed() < LIMIT_CHECK_TTL => Some(u),
+            _ => match self.usage().await {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!("利用上限を確かめられないため、そのまま実行します: {e}");
+                    return Ok(());
+                }
+            },
+        };
+        match usage.and_then(|u| u.blocked_message()) {
+            Some(message) => Err(message),
+            None => Ok(()),
         }
     }
 
@@ -207,6 +267,23 @@ mod tests {
     fn path_segment_escapes() {
         assert_eq!(path_segment("abc-DEF_123"), "abc-DEF_123");
         assert_eq!(path_segment("../a b"), "%2E%2E%2Fa%20b");
+    }
+
+    #[test]
+    fn usage_without_limit_fields() {
+        // 上限の機能が入る前のバックエンドの応答
+        let u: Usage = serde_json::from_value(json!({"todayUsd": 0.1, "monthUsd": 1.0, "monthStart": "2026-10-31T15:00:00Z"})).unwrap();
+        assert!(u.limit_usd.is_none() && !u.blocked && u.blocked_message().is_none());
+    }
+
+    #[test]
+    fn usage_blocked_message() {
+        let u: Usage = serde_json::from_value(json!({
+            "todayUsd": 1.0, "monthUsd": 12.0, "monthStart": "2026-10-31T15:00:00Z",
+            "limitUsd": 10.0, "periodStart": "2026-10-31T15:00:00Z", "periodUsd": 12.0, "warn": true, "blocked": true
+        }))
+        .unwrap();
+        assert!(u.blocked_message().unwrap().contains("$10.00"));
     }
 
     #[test]

@@ -215,8 +215,14 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
           return send(204);
         case "GET /usage": {
           const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
-          log("API: GET /usage", `今日 $${mockCostUsd.toFixed(4)}`);
-          return send(200, { todayUsd: mockCostUsd, monthUsd: mockCostUsd + 1.234, monthStart });
+          const monthUsd = mockCostUsd + 1.234;
+          // 利用上限の模擬: MOCK_MONTHLY_LIMIT_USD (例 1.24 にすると数回のやり取りで上限に達する)。未設定なら上限なし
+          const limit = Number(process.env.MOCK_MONTHLY_LIMIT_USD ?? 0);
+          const limitUsd = limit > 0 ? limit : null;
+          const blocked = limitUsd !== null && monthUsd >= limitUsd;
+          const warn = limitUsd !== null && monthUsd >= limitUsd * 0.8;
+          log("API: GET /usage", `今日 $${mockCostUsd.toFixed(4)}`, limitUsd ? `上限 $${limitUsd}${blocked ? " (到達)" : ""}` : "");
+          return send(200, { todayUsd: mockCostUsd, monthUsd, monthStart, limitUsd, periodStart: monthStart, periodUsd: monthUsd, warn, blocked });
         }
         default:
           return send(404, { message: "Not Found" });
