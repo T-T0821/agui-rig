@@ -4,19 +4,19 @@
 
 locals {
   # IAM の条件キーは issuer から https:// を除いたもの。Auth0 は末尾に / が付くので、キーも "<テナント>.auth0.com/:aud" になる
-  oidc_host = trimprefix(var.oidc_issuer, "https://")
+  oidc_host = trimprefix(local.oidc_issuer, "https://")
 }
 
 data "tls_certificate" "issuer" {
   count = var.create_oidc_provider ? 1 : 0
-  url   = var.oidc_issuer
+  url   = local.oidc_issuer
 }
 
-# Auth0 の iss と同じく末尾の / まで含めて登録する (トークンの iss と照合されるため)
+# トークンの iss と同じ文字列で登録する (Auth0 は末尾の / まで含める。Cognito は / が付かない)
 resource "aws_iam_openid_connect_provider" "issuer" {
   count           = var.create_oidc_provider ? 1 : 0
-  url             = var.oidc_issuer
-  client_id_list  = [var.oidc_client_id]
+  url             = local.oidc_issuer
+  client_id_list  = [local.oidc_client_id]
   thumbprint_list = [data.tls_certificate.issuer[0].certificates[length(data.tls_certificate.issuer[0].certificates) - 1].sha1_fingerprint]
 }
 
@@ -38,16 +38,23 @@ data "aws_iam_policy_document" "app_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_host}:aud"
-      values   = [var.oidc_client_id]
+      values   = [local.oidc_client_id]
     }
   }
 }
 
 resource "aws_iam_role" "app" {
   name                 = "${var.name}-app"
-  description          = "agui-rig のアプリが Auth0 の ID トークンで引き受けるロール"
+  description          = "agui-rig のアプリが ID トークン (Auth0 / Cognito) で引き受けるロール"
   assume_role_policy   = data.aws_iam_policy_document.app_trust.json
   max_session_duration = 3600
+
+  lifecycle {
+    precondition {
+      condition     = local.oidc_issuer != "" && local.oidc_client_id != ""
+      error_message = "oidc_issuer と oidc_client_id (Auth0) を指定するか、create_cognito = true にしてください。"
+    }
+  }
 }
 
 data "aws_iam_policy_document" "app" {

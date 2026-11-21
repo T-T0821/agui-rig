@@ -77,6 +77,8 @@ docs/images/      README の図
 
 ![agui-rig の AWS 構成図](docs/images/aws-architecture.png)
 
+元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。
+
 <details>
 <summary>同じ図の Mermaid 版 (テキストで直すとき用)</summary>
 
@@ -156,6 +158,39 @@ flowchart LR
 - ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
 - 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
   DynamoDB と Langfuse にはそのまま入ります
+
+## 開発用のログイン (Cognito)
+
+Auth0 を本番でしか使えない場合、開発環境では Amazon Cognito のユーザープールで同じ動きをさせられます。
+Cognito も OpenID Connect の ID トークンを出すので、STS、API Gateway の JWT オーソライザー、Collector はそのまま動きます。
+
+| 項目 | 本番 (Auth0) | 開発 (Cognito) |
+| --- | --- | --- |
+| `OAUTH_ISSUER` | `https://<テナント>.auth0.com/` (末尾 `/` あり) | `https://cognito-idp.<リージョン>.amazonaws.com/<プール ID>` (末尾 `/` なし) |
+| `OAUTH_CLIENT_ID` (ID トークンの `aud`) | Auth0 の Client ID | Cognito のアプリクライアント ID |
+| リダイレクト URI | `http://127.0.0.1:53682/callback` | `http://localhost:53682/callback` (Cognito は http なら `localhost` しか許さない) |
+| リフレッシュトークン | `offline_access` スコープで受け取る | スコープ指定なしで出る (`offline_access` は受け付けない) |
+| 利用者 ID (`sub`) | `auth0\|...` など | UUID |
+
+アプリ側は、issuer が Cognito なら自動で `localhost` にリダイレクトし、`offline_access` も外すので、`OAUTH_ISSUER` と `OAUTH_CLIENT_ID` を変えるだけです
+(明示するなら `OAUTH_REDIRECT_HOST=localhost`)。`localhost` のときは 127.0.0.1 と ::1 の両方で受けます。
+
+Terraform で作る場合は、本番とは別の state (例: `terraform workspace new dev`) で `create_cognito = true` にします (`oidc_issuer` / `oidc_client_id` は空にする)。
+
+```sh
+cd infra/terraform
+terraform workspace new dev
+terraform apply -var create_cognito=true -var name=agui-rig-dev -var table_name=agui-rig-dev-chat-history
+terraform output   # oauth_issuer → OAUTH_ISSUER、oauth_client_id → OAUTH_CLIENT_ID、chat_api_url、app_role_arn
+
+# 利用者は管理者が作る (自分でサインアップはできない設定)。仮パスワードは初回ログインで変更を求められる
+aws cognito-idp admin-create-user --user-pool-id "$(terraform output -raw cognito_user_pool_id)" \
+  --username dev@example.com --user-attributes Name=email,Value=dev@example.com Name=email_verified,Value=true
+```
+
+作られるもの: ユーザープール (メールでログイン、管理者だけが利用者を作れる)、ログイン画面のドメイン、
+デスクトップ用のパブリッククライアント (シークレットなし、Authorization Code + PKCE、ID トークン 1 時間、リフレッシュトークン 30 日)。
+アプリの設定は `app/desktop/config/dev.example.json` を参考に、開発用のビルドに埋め込めます。
 
 ## AWS 側の準備 (Terraform)
 
@@ -249,7 +284,8 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 
 | 変数 | 内容 |
 | --- | --- |
-| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | Auth0 (OIDC)。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
+| `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | ログインの IdP (本番は Auth0、開発は Cognito も可)。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
+| `OAUTH_REDIRECT_PORT` / `OAUTH_REDIRECT_HOST` | リダイレクトを受けるポートとホスト (`127.0.0.1` か `localhost`)。ホストは未設定なら、Cognito は `localhost`、それ以外は `127.0.0.1` |
 | `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`npm run dev:aws` が設定する) |
 | `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
 | `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |

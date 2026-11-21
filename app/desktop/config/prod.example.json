@@ -1,6 +1,7 @@
 {
-  "OAUTH_ISSUER": "https://auth.example.com",
+  "OAUTH_ISSUER": "https://your-tenant.auth0.com/",
   "OAUTH_CLIENT_ID": "chat-app",
+  "OAUTH_REDIRECT_PORT": "53682",
   "AWS_REGION": "ap-northeast-1",
   "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/chat-app-bedrock",
   "BEDROCK_MODEL_ID": "global.anthropic.claude-sonnet-5-5",

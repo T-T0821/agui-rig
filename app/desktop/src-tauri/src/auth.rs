@@ -1,8 +1,8 @@
-//! Auth0 (OpenID Connect) でのログイン。
+//! OpenID Connect でのログイン (本番は Auth0、開発は Amazon Cognito のユーザープールも使える)。
 //!
 //! デスクトップアプリ向けの標準的な方式 (RFC 8252) で行う:
 //! Authorization Code + PKCE、OS の既定ブラウザでログインし、
-//! 127.0.0.1 のループバックでリダイレクトを受ける。クライアントシークレットは使わない。
+//! ループバック (127.0.0.1、または localhost) でリダイレクトを受ける。クライアントシークレットは使わない。
 //!
 //! 取得したトークンは Rust のメモリ上だけに置き、WebView には渡さない。
 
@@ -25,13 +25,56 @@ pub struct OAuthConfig {
     pub scopes: String,
     /// リダイレクトを受けるポート (0 なら空きポート。基盤側でポート固定が必要なら指定)
     pub redirect_port: u16,
+    /// リダイレクト URI のホスト名。Cognito は http なら localhost しか許さないので localhost にする
+    pub redirect_host: RedirectHost,
+}
+
+/// リダイレクト URI のホスト名。どちらもこの PC の中だけで受ける (外からは届かない)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RedirectHost {
+    /// `http://127.0.0.1:<port>/callback` (RFC 8252 のおすすめ。Auth0 など)
+    Loopback,
+    /// `http://localhost:<port>/callback` (Amazon Cognito)。127.0.0.1 と ::1 の両方で受ける
+    Localhost,
+}
+
+impl RedirectHost {
+    /// `OAUTH_REDIRECT_HOST` の値。未設定なら、issuer が Cognito のときだけ localhost にする。
+    fn from_setting(value: Option<&str>, issuer: &str) -> Result<Self, String> {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            Some("127.0.0.1") => Ok(Self::Loopback),
+            Some("localhost") => Ok(Self::Localhost),
+            Some(other) => Err(format!("OAUTH_REDIRECT_HOST は 127.0.0.1 か localhost にしてください ({other})")),
+            None if is_cognito(issuer) => Ok(Self::Localhost),
+            None => Ok(Self::Loopback),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Loopback => "127.0.0.1",
+            Self::Localhost => "localhost",
+        }
+    }
+}
+
+/// issuer が Amazon Cognito のユーザープール (https://cognito-idp.<リージョン>.amazonaws.com/<プール ID>) か。
+fn is_cognito(issuer: &str) -> bool {
+    url::Url::parse(issuer)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.starts_with("cognito-idp.") && h.ends_with(".amazonaws.com")))
+        .unwrap_or(false)
 }
 
 impl OAuthConfig {
     /// OAUTH_ISSUER が無ければ None (ログインなしの開発モード)。
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env() -> Option<Result<Self, String>> {
         let issuer = std::env::var("OAUTH_ISSUER").ok().filter(|s| !s.trim().is_empty())?;
-        Some(Self {
+        let redirect_host = match RedirectHost::from_setting(std::env::var("OAUTH_REDIRECT_HOST").ok().as_deref(), &issuer) {
+            Ok(h) => h,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(Ok(Self {
             issuer: issuer.trim_end_matches('/').to_string(),
             client_id: std::env::var("OAUTH_CLIENT_ID").unwrap_or_default(),
             scopes: std::env::var("OAUTH_SCOPES")
@@ -40,7 +83,8 @@ impl OAuthConfig {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(0),
-        })
+            redirect_host,
+        }))
     }
 }
 
@@ -48,6 +92,19 @@ impl OAuthConfig {
 struct Discovery {
     authorization_endpoint: String,
     token_endpoint: String,
+    /// 対応しているスコープ (書いていない IdP もある)
+    #[serde(default)]
+    scopes_supported: Option<Vec<String>>,
+}
+
+/// 要求するスコープ。IdP が offline_access に対応していなければ外す
+/// (Cognito は offline_access を受け付けず、付けなくてもリフレッシュトークンを返す)。
+fn request_scopes(configured: &str, supported: Option<&[String]>) -> String {
+    configured
+        .split_whitespace()
+        .filter(|s| *s != "offline_access" || supported.is_none_or(|list| list.iter().any(|x| x == "offline_access")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Deserialize)]
@@ -148,7 +205,13 @@ impl OAuthClient {
             .await
             .map_err(|e| format!("リダイレクト用のポートを開けません: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        // localhost は ::1 に解決されることもあるので、同じポートで IPv6 のループバックでも受ける (開けなければ IPv4 だけ)
+        let listener_v6 = match self.config.redirect_host {
+            RedirectHost::Localhost => TcpListener::bind(("::1", port)).await.ok(),
+            RedirectHost::Loopback => None,
+        };
+        let redirect_uri = format!("http://{}:{port}/callback", self.config.redirect_host.name());
+        let scopes = request_scopes(&self.config.scopes, discovery.scopes_supported.as_deref());
 
         // PKCE と state
         let verifier = Alphanumeric.sample_string(&mut rand::rng(), 64);
@@ -161,14 +224,14 @@ impl OAuthClient {
             .append_pair("response_type", "code")
             .append_pair("client_id", &self.config.client_id)
             .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &self.config.scopes)
+            .append_pair("scope", &scopes)
             .append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
         open_browser(auth_url.as_str());
 
         // ブラウザからのリダイレクトを待つ (5 分でタイムアウト)
-        let code = tokio::time::timeout(Duration::from_secs(300), wait_for_code(&listener, &state))
+        let code = tokio::time::timeout(Duration::from_secs(300), wait_for_code(&listener, listener_v6.as_ref(), &state))
             .await
             .map_err(|_| "ログインがタイムアウトしました".to_string())??;
 
@@ -225,9 +288,16 @@ impl OAuthClient {
 }
 
 /// ループバックで認可コードを受け取る。
-async fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
+async fn wait_for_code(listener: &TcpListener, listener_v6: Option<&TcpListener>, expected_state: &str) -> Result<String, String> {
     loop {
-        let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        let accepted = match listener_v6 {
+            Some(v6) => tokio::select! {
+                r = listener.accept() => r,
+                r = v6.accept() => r,
+            },
+            None => listener.accept().await,
+        };
+        let (mut stream, _) = accepted.map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 8192];
         let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
         let request = String::from_utf8_lossy(&buf[..n]);
@@ -247,7 +317,7 @@ async fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<S
             _ => (Err("ログインの応答が不正です (state 不一致)".to_string()), "ログインの応答が不正です。"),
         };
         let body = format!(
-            "<!doctype html><meta charset=\"utf-8\"><title>Mastra Chat</title><p style=\"font-family:sans-serif;padding:2em\">{message}</p>"
+            "<!doctype html><meta charset=\"utf-8\"><title>Rig Chat</title><p style=\"font-family:sans-serif;padding:2em\">{message}</p>"
         );
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -255,5 +325,32 @@ async fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<S
         );
         let _ = stream.write_all(response.as_bytes()).await;
         return result;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redirect_host_defaults() {
+        let auth0 = "https://tenant.auth0.com/";
+        let cognito = "https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_AbCdEf";
+        assert_eq!(RedirectHost::from_setting(None, auth0), Ok(RedirectHost::Loopback));
+        assert_eq!(RedirectHost::from_setting(None, cognito), Ok(RedirectHost::Localhost));
+        assert_eq!(RedirectHost::from_setting(Some("127.0.0.1"), cognito), Ok(RedirectHost::Loopback));
+        assert_eq!(RedirectHost::from_setting(Some("localhost"), auth0), Ok(RedirectHost::Localhost));
+        assert!(RedirectHost::from_setting(Some("0.0.0.0"), auth0).is_err());
+        assert!(!is_cognito("https://cognito-idp.example.com/x"));
+    }
+
+    #[test]
+    fn drops_unsupported_offline_access() {
+        let all = "openid profile email offline_access";
+        let cognito: Vec<String> = ["openid", "email", "phone", "profile"].map(String::from).to_vec();
+        let auth0: Vec<String> = ["openid", "profile", "email", "offline_access"].map(String::from).to_vec();
+        assert_eq!(request_scopes(all, Some(&cognito)), "openid profile email");
+        assert_eq!(request_scopes(all, Some(&auth0)), all);
+        assert_eq!(request_scopes(all, None), all);
     }
 }
