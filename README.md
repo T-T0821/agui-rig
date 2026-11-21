@@ -369,6 +369,27 @@ xvfb-run -a -s "-screen 0 1280x800x24" npm test
 CI (`.github/workflows/e2e.yml`) でも Ubuntu で動かし、成果物 `e2e-artifacts` に残します。
 macOS には WebDriver が無いため、tauri-driver の E2E は Linux と Windows だけで動きます。
 
+### 本物の AWS への疎通確認
+
+`app/desktop/e2e` の `npm run smoke:aws` で、アプリが使う AWS のサービスを 1 つずつ最小の呼び出しで確かめます。
+認証は AWS SDK 標準 (`AWS_PROFILE`、SSO など) で、`npm run dev:aws` と同じです。`app/desktop/.env` も読みます。
+
+```sh
+cd app/desktop/e2e && npm ci
+AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 npm run smoke:aws
+# API Gateway まで確かめるなら CHAT_API_URL (terraform output chat_api_url) と、ログインで得た ID_TOKEN も渡す
+```
+
+| 確認 | 内容 |
+| --- | --- |
+| STS | 認証情報が有効か (GetCallerIdentity) |
+| Bedrock | `BEDROCK_MODEL_ID` のモデルを最大 16 トークンで呼ぶ (わずかに費用がかかる) |
+| AgentCore | Code Interpreter のセッションを開始し、`print(1 + 1)` を実行して終了する (`CODE_INTERPRETER_ID=off` で省略) |
+| API Gateway | トークンなしで 401 になること。`ID_TOKEN` があれば `/threads` と `/usage` が 200 になること |
+
+画面まで含めて確かめるなら、Linux では `npm run test:aws` で、`dev:aws` と同じ設定 (ログインなし) のアプリに
+「Code Interpreter で計算して」と送り、本物のモデルの回答を待つ E2E も動かせます (費用がかかります)。
+
 ## トレースと利用料金 (Langfuse)
 
 Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
@@ -605,7 +626,7 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
 | `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
 | `app/desktop/dev/mock-env.mjs` | アプリを模擬サーバーに向ける環境変数 (`dev:mock` と E2E テストで共通) |
-| `app/desktop/e2e/` | E2E テスト (tauri-driver + WebdriverIO、模擬環境) |
+| `app/desktop/e2e/` | E2E テスト (tauri-driver + WebdriverIO、模擬環境 / 本物の AWS) と AWS の疎通確認 (`aws-smoke.mjs`) |
 | `.github/workflows/e2e.yml` | E2E テストの CI |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 

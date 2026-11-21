@@ -11,9 +11,14 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { mockEnv } from "../dev/mock-env.mjs";
+import { exampleMcpConfig, mockEnv } from "../dev/mock-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+/**
+ * mock (既定): 全部を模擬サーバーに向ける。
+ * aws: `npm run dev:aws` と同じく、ログインを省略して AWS SDK 標準の認証 (AWS_PROFILE など) で本物の Bedrock を呼ぶ
+ */
+const mode = process.env.E2E_MODE === "aws" ? "aws" : "mock";
 const isWindows = process.platform === "win32";
 const port = Number(process.env.MOCK_PORT ?? 9123);
 export const mockBase = `http://127.0.0.1:${port}`;
@@ -45,7 +50,7 @@ fetch(process.argv[2]).then((r) => console.error("[fake-browser]", r.status, r.u
 
 export const config = {
   runner: "local",
-  specs: ["./specs/**/*.e2e.mjs"],
+  specs: [mode === "aws" ? "./specs/aws/*.e2e.mjs" : "./specs/*.e2e.mjs"],
   maxInstances: 1,
   hostname: "127.0.0.1",
   port: 4444,
@@ -60,8 +65,10 @@ export const config = {
   onPrepare: async () => {
     rmSync(artifacts, { recursive: true, force: true });
     mkdirSync(artifacts, { recursive: true });
-    const { startMockServer } = await import("../dev/mock-server.mjs");
-    mock = (await startMockServer({ port, log: (...a) => console.error("[mock]", ...a) })).server;
+    if (mode === "mock") {
+      const { startMockServer } = await import("../dev/mock-server.mjs");
+      mock = (await startMockServer({ port, log: (...a) => console.error("[mock]", ...a) })).server;
+    }
 
     // 画面の録画 (Xvfb などの X ディスプレイがあり、ffmpeg が入っているときだけ)。既定はアプリの窓の大きさ
     if (process.env.DISPLAY && process.env.E2E_VIDEO !== "0" && spawnSync("ffmpeg", ["-version"]).status === 0) {
@@ -76,7 +83,10 @@ export const config = {
   },
 
   beforeSession: () => {
-    const env = { ...process.env, ...mockEnv(mockBase) };
+    const env =
+      mode === "aws"
+        ? { ...process.env, DEV_SKIP_LOGIN: "1", MCP_CONFIG: process.env.MCP_CONFIG || exampleMcpConfig() }
+        : { ...process.env, ...mockEnv(mockBase) };
     if (!isWindows) env.PATH = `${fakeBrowserDir()}${delimiter}${env.PATH}`;
     tauriDriver = spawn(process.env.TAURI_DRIVER ?? join(homedir(), ".cargo", "bin", "tauri-driver"), [], {
       stdio: [null, process.stdout, process.stderr],
