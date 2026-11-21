@@ -6,20 +6,23 @@
 // infra/terraform を Terraform workspace `dev-<名前>` で、名前の接頭辞 `agui-rig-dev-<名前>` で apply する。
 // Cognito のユーザープール・IAM ロール・API Gateway・Lambda・DynamoDB はすべて開発者ごとに別。
 // up の後は `pnpm dev:cloud` で、本物のログイン (Cognito) つきでこの環境に向けてアプリを起動する。
+// 自分の設定はリポジトリのルートの .env.cloud (例は .env.cloud.example) に書く: DEV_ENV_USER、DEV_ENV_EMAIL、AWS_PROFILE、AWS_REGION。
+// up はできた環境の接続先 (OAUTH_ISSUER など) を同じファイルに書き足し、down で消す。`pnpm dev:cloud` はこのファイルを読む。
 // 必要なもの: terraform (1.6 以上)、aws CLI、AWS の認証 (AWS_PROFILE / aws sso login など。IAM・Cognito・Lambda などを作れる権限)
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CLOUD_ENV_FILE, MANAGED_KEYS, loadCloudEnv, readCloudEnv, updateCloudEnv } from "./env-file.mjs";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(desktop, "..", "..");
 const tfDir = join(repo, "infra", "terraform");
 const backendDir = join(repo, "app", "backend");
-/** `pnpm dev:cloud` が読む、自分の環境の接続先 (git には入れない) */
-const CLOUD_ENV_FILE = join(desktop, ".dev-cloud.json");
+// .env.cloud の値 (AWS_PROFILE など) を、terraform と aws CLI にも渡るよう process.env に入れる
+loadCloudEnv();
 const isWindows = process.platform === "win32";
 
 /** 引数を `--key value` と、`--` の後ろ (Terraform にそのまま渡す) に分ける。 */
@@ -156,18 +159,26 @@ function ensureCognitoUser(poolId, email, region) {
   console.error(`[dev-env] Cognito の利用者 ${email} を作りました。仮パスワードがメールで届きます (初回ログインで変更)`);
 }
 
-function writeCloudEnv(user, out) {
-  const env = {
-    DEV_ENV_USER: user,
+/** 接続先を .env.cloud に書く。名前とメールは、ファイルに無ければ次回のために書いておく。 */
+function writeCloudEnv(user, email, out) {
+  const current = readCloudEnv();
+  updateCloudEnv(
+    {
+      ...(current.DEV_ENV_USER ? {} : { DEV_ENV_USER: user }),
+      ...(current.DEV_ENV_EMAIL || !email ? {} : { DEV_ENV_EMAIL: email }),
+      ...(current.AWS_REGION ? {} : { AWS_REGION: out.region }),
+    },
+    { managed: false },
+  );
+  const values = {
     OAUTH_ISSUER: out.oauth_issuer,
     OAUTH_CLIENT_ID: out.oauth_client_id,
     OAUTH_REDIRECT_PORT: "53682",
-    AWS_REGION: out.region,
     AWS_ROLE_ARN: out.app_role_arn,
     CHAT_API_URL: out.chat_api_url,
   };
-  writeFileSync(CLOUD_ENV_FILE, `${JSON.stringify(env, null, 2)}\n`);
-  return env;
+  updateCloudEnv(values);
+  return values;
 }
 
 /** workspace を選ぶ。ほかの開発者の環境を誤って触らないよう、選んだ後に確かめる。 */
@@ -205,7 +216,7 @@ switch (command) {
     const out = outputs();
     if (!out.cognito_user_pool_id) fail("Cognito のユーザープールが出力にありません");
     ensureCognitoUser(out.cognito_user_pool_id, email, out.region);
-    writeCloudEnv(user, out);
+    writeCloudEnv(user, email, out);
     console.error(`
 [dev-env] ${user} の開発環境ができました (workspace ${ws}, 接頭辞 ${name})
   接続先: ${CLOUD_ENV_FILE}
@@ -220,7 +231,8 @@ switch (command) {
     selectWorkspace(ws, { create: false });
     // destroy でも Lambda の zip (data.archive_file) が要る
     ensureBackendBuilt();
-    const region = opts.region || outputs().region || process.env.AWS_REGION || "ap-northeast-1";
+    const before = outputs();
+    const region = opts.region || before.region || process.env.AWS_REGION || "ap-northeast-1";
     terraform([
       "destroy",
       "-input=false",
@@ -231,12 +243,9 @@ switch (command) {
     if (left) fail(`まだリソースが残っています。workspace ${ws} はそのままにします:\n${left}`);
     terraform(["workspace", "select", "default"]);
     terraform(["workspace", "delete", ws]);
-    if (existsSync(CLOUD_ENV_FILE)) {
-      try {
-        if (JSON.parse(readFileSync(CLOUD_ENV_FILE, "utf8")).DEV_ENV_USER === user) rmSync(CLOUD_ENV_FILE);
-      } catch {
-        // 壊れていれば残す
-      }
+    // .env.cloud がこの環境を指していれば接続先だけ消す (自分で書いた値は残す)
+    if (before.chat_api_url && readCloudEnv().CHAT_API_URL === before.chat_api_url) {
+      updateCloudEnv(Object.fromEntries(MANAGED_KEYS.map((k) => [k, undefined])));
     }
     console.error(`[dev-env] ${user} の開発環境を削除しました`);
     break;
@@ -247,7 +256,8 @@ switch (command) {
     selectWorkspace(workspaceOf(user), { create: false });
     const out = outputs();
     if (!out.chat_api_url) fail(`${user} の開発環境はまだ作られていません (pnpm dev-env up)`);
-    console.log(JSON.stringify(writeCloudEnv(user, out), null, 2));
+    const values = writeCloudEnv(user, "", out);
+    for (const k of MANAGED_KEYS) console.log(`${k}=${values[k]}`);
     break;
   }
 

@@ -264,22 +264,42 @@ terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、app_r
 手元のアプリ (`tauri dev`) をそこへ向けます。模擬ではなく本物のログイン → STS → Bedrock / Code Interpreter → 履歴 API の流れを、
 他の人の環境に影響を与えずに試せます。
 
+自分の設定はルートの `.env.cloud` に env 形式で持ちます (git には入りません)。
+
 ```sh
-aws sso login --profile my-dev                     # など。IAM・Cognito・Lambda などを作れる権限が要る
-export AWS_PROFILE=my-dev
-pnpm dev-env up --user alice --email alice@example.com   # 作る (terraform apply の確認が出る)
-pnpm dev:cloud                                  # 自分の環境に向けてアプリを起動し、そのメールでログイン
-pnpm dev-env down --user alice               # 丸ごと消す
+cp .env.cloud.example .env.cloud   # DEV_ENV_USER、DEV_ENV_EMAIL、AWS_PROFILE、AWS_REGION を自分の値に
+aws sso login --profile my-dev     # など。IAM・Cognito・Lambda などを作れる権限が要る
+pnpm dev-env up                    # 作る (terraform apply の確認が出る)。接続先が .env.cloud に書き足される
+pnpm dev:cloud                     # .env.cloud の値でアプリを起動し、DEV_ENV_EMAIL のメールでログイン
+pnpm dev-env down                  # 丸ごと消す。書き足した接続先も消える (自分で書いた値は残る)
+```
+
+`up` の後の `.env.cloud` はこうなります:
+
+```sh
+DEV_ENV_USER=alice
+DEV_ENV_EMAIL=alice@example.com
+AWS_PROFILE=my-dev
+AWS_REGION=ap-northeast-1
+
+# ---- pnpm dev-env up が書く接続先 (手で変えない。down で消える) ----
+OAUTH_ISSUER=https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_XXXXXXXXX
+OAUTH_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
+OAUTH_REDIRECT_PORT=53682
+AWS_ROLE_ARN=arn:aws:iam::123456789012:role/agui-rig-dev-alice-app
+CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
 ```
 
 | コマンド | 内容 |
 | --- | --- |
-| `pnpm dev-env up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `app/desktop/.dev-cloud.json` に書く |
-| `pnpm dev:cloud` | `.dev-cloud.json` の接続先 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
-| `pnpm dev-env status` | 自分の環境の出力を表示し、`.dev-cloud.json` を書き直す |
-| `pnpm dev-env down` | `terraform destroy` の後、workspace と `.dev-cloud.json` を消す |
+| `pnpm dev-env up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `.env.cloud` に書き足す |
+| `pnpm dev:cloud` | `.env.cloud` の値 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`、あれば `BEDROCK_MODEL_ID`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
+| `pnpm dev-env status` | 自分の環境の接続先を表示し、`.env.cloud` に書き直す |
+| `pnpm dev-env down` | `terraform destroy` の後、workspace と `.env.cloud` の接続先を消す |
 | `pnpm dev-env list` | この state にある開発者ごとの環境 (`dev-*` の workspace) |
 
+- **設定の優先順**: コマンドの引数 (`--user`、`--email`、`--region`) > シェルの環境変数 > `.env.cloud`。
+  `up` のときに `.env.cloud` に名前・メール・リージョンが無ければ、使った値を書いておきます
 - **名前**: `--user` > `DEV_ENV_USER` > OS のユーザ名 (英小文字・数字・ハイフン、20 文字まで)。リソース名の接頭辞は `agui-rig-dev-<名前>` です。
   メールは `--email` > `DEV_ENV_EMAIL` > `git config user.email`、リージョンは `--region` > `AWS_REGION` > `ap-northeast-1`
 - **分離**: ユーザープール・OIDC プロバイダー (issuer がプールごとに違う)・IAM ロール・API・テーブルはすべて人ごとに別で、Terraform の state も workspace で分かれます

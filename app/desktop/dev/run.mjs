@@ -6,7 +6,7 @@
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,14 +79,19 @@ if (mode === "mock") {
   });
   child.on("exit", (code) => process.exit(code ?? 0));
 } else if (mode === "cloud") {
-  // dev/cloud-env.mjs (pnpm dev-env up) が書いた、自分の開発環境の接続先
-  const file = join(root, ".dev-cloud.json");
-  if (!existsSync(file)) {
-    console.error("[dev] 自分の開発環境がありません。先にルートで pnpm dev-env up を実行してください");
+  // ルートの .env.cloud (自分の設定と、pnpm dev-env up が書いた接続先)。シェルで設定済みの値が優先
+  const { CLOUD_ENV_FILE, readCloudEnv } = await import("./env-file.mjs");
+  const file = readCloudEnv();
+  const cloud = Object.fromEntries(
+    ["OAUTH_ISSUER", "OAUTH_CLIENT_ID", "OAUTH_REDIRECT_PORT", "AWS_REGION", "AWS_ROLE_ARN", "CHAT_API_URL", "BEDROCK_MODEL_ID"]
+      .map((k) => [k, process.env[k] ?? file[k]])
+      .filter(([, v]) => v),
+  );
+  if (!cloud.CHAT_API_URL || !cloud.AWS_ROLE_ARN) {
+    console.error(`[dev] ${CLOUD_ENV_FILE} に自分の開発環境の接続先がありません。先にルートで pnpm dev-env up を実行してください`);
     process.exit(1);
   }
-  const { DEV_ENV_USER: user, ...cloud } = JSON.parse(readFileSync(file, "utf8"));
-  console.error(`[dev] ${user} の開発環境 (${cloud.CHAT_API_URL}) に向けて起動します`);
+  console.error(`[dev] ${file.DEV_ENV_USER ?? ""} の開発環境 (${cloud.CHAT_API_URL}) に向けて起動します`);
   const child = tauriDev(
     {
       ...cloud,
