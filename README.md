@@ -14,8 +14,8 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 | 知りたいこと | 節 |
 | --- | --- |
 | 全体像 | [フォルダ構成](#フォルダ構成) ・ [アプリの構成](#アプリの構成) ・ [AWS 構成 (本番運用相当)](#aws-構成-本番運用相当) |
-| 環境を作る | [Auth0 の設定](#auth0-の設定) ・ [開発用のログイン (Cognito)](#開発用のログイン-cognito) ・ [AWS 側の準備 (Terraform)](#aws-側の準備-terraform) |
-| 動かす | [動かし方](#動かし方) (模擬 / 本物の AWS / 本物の環境) |
+| 環境を作る | [Auth0 の設定](#auth0-の設定) ・ [開発用のログイン (Cognito)](#開発用のログイン-cognito) ・ [AWS 側の準備 (Terraform)](#aws-側の準備-terraform) ・ [開発者ごとの AWS 開発環境](#開発者ごとの-aws-開発環境) |
+| 動かす | [動かし方](#動かし方) (模擬 / 本物の AWS / 自分の開発環境 / 本物の環境) |
 | トレース・料金・上限 | [トレースと利用料金 (Langfuse)](#トレースと利用料金-langfuse) |
 | 配る | [配布するとき (設定の渡し方)](#配布するとき-設定の渡し方) |
 | その他 | [ファイル](#ファイル) ・ [補足](#補足) ・ [ライセンス](#ライセンス) |
@@ -203,6 +203,7 @@ Cognito も OpenID Connect の ID トークンを出すので、STS、API Gatewa
 (明示するなら `OAUTH_REDIRECT_HOST=localhost`)。`localhost` のときは 127.0.0.1 と ::1 の両方で受けます。
 
 Terraform で作る場合は、本番とは別の state (例: `terraform workspace new dev`) で `create_cognito = true` にします (`oidc_issuer` / `oidc_client_id` は空にする)。
+開発者が各自の環境を持つなら、下の [開発者ごとの AWS 開発環境](#開発者ごとの-aws-開発環境) のコマンドがこれを 1 人ずつ作ります。
 
 ```sh
 cd infra/terraform
@@ -253,6 +254,43 @@ terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、app_r
 - Lambda はオーソライザーが検証した `sub` 以外の利用者を指定できないので、他人の会話には届きません
 - API の料金はリクエスト数で決まります (HTTP API は 100 万件あたり約 1 USD)。会話 1 回で保存と一覧の読み直しが数回起きます
 - `chat_api_url` を設定しなければ、履歴は保存しません
+- 全リソースに `Project`、`Environment` (`environment`、既定 `prod`)、`Owner` (`owner` を指定したとき) のタグが付きます
+
+## 開発者ごとの AWS 開発環境
+
+開発者 1 人ずつに、自分専用のバックエンド (Cognito・IAM ロール・API Gateway・Lambda・DynamoDB) を AWS に作り、
+手元のアプリ (`tauri dev`) をそこへ向けます。模擬ではなく本物のログイン → STS → Bedrock / Code Interpreter → 履歴 API の流れを、
+他の人の環境に影響を与えずに試せます。
+
+```sh
+cd app/desktop
+aws sso login --profile my-dev                     # など。IAM・Cognito・Lambda などを作れる権限が要る
+export AWS_PROFILE=my-dev
+npm run dev-env -- up --user alice --email alice@example.com   # 作る (terraform apply の確認が出る)
+npm run dev:cloud                                  # 自分の環境に向けてアプリを起動し、そのメールでログイン
+npm run dev-env -- down --user alice               # 丸ごと消す
+```
+
+| コマンド | 内容 |
+| --- | --- |
+| `npm run dev-env -- up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `app/desktop/.dev-cloud.json` に書く |
+| `npm run dev:cloud` | `.dev-cloud.json` の接続先 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
+| `npm run dev-env -- status` | 自分の環境の出力を表示し、`.dev-cloud.json` を書き直す |
+| `npm run dev-env -- down` | `terraform destroy` の後、workspace と `.dev-cloud.json` を消す |
+| `npm run dev-env -- list` | この state にある開発者ごとの環境 (`dev-*` の workspace) |
+
+- **名前**: `--user` > `DEV_ENV_USER` > OS のユーザ名 (英小文字・数字・ハイフン、20 文字まで)。リソース名の接頭辞は `agui-rig-dev-<名前>` です。
+  メールは `--email` > `DEV_ENV_EMAIL` > `git config user.email`、リージョンは `--region` > `AWS_REGION` > `ap-northeast-1`
+- **分離**: ユーザープール・OIDC プロバイダー (issuer がプールごとに違う)・IAM ロール・API・テーブルはすべて人ごとに別で、Terraform の state も workspace で分かれます
+- **料金**: どれも従量課金のサーバーレスなので、使っていない間はほぼかかりません (Cognito は月 1 万 MAU まで無料、
+  DynamoDB はオンデマンドで PITR を切る、API Gateway と Lambda はリクエスト数)。実際にかかるのは Bedrock と Code Interpreter を呼んだ分です
+- **作らないもの**: 利用料金と利用上限 (Langfuse と VPC が要るため)。画面に料金は出ません。トレースも既定では送りません
+- **消し忘れ**: 全リソースに `Environment=dev`、`Owner=<名前>` のタグが付くので、
+  `aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=dev` などで探せます
+- `--` の後ろは Terraform にそのまま渡ります (例: `npm run dev-env -- up -- -auto-approve -var 'bedrock_model_arns=["..."]'`)
+- state は既定ではローカル (`infra/terraform/terraform.tfstate.d/dev-<名前>/`) です。チームで S3 などの `backend` を足せば、
+  workspace ごとに別の state になり、`list` で全員の環境が見えます
+- IAM の OIDC プロバイダーはアカウントあたり 100 個までなので、開発者がそれ以上になる場合は共用の開発環境 (上の Cognito の節) を使ってください
 
 ## 動かし方
 
@@ -290,7 +328,16 @@ Auth0 を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数
 AgentCore Code Interpreter を呼びます。そのプロファイルには、上の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
 `.env` に `AWS_PROFILE` などを書いておいても使われます。
 
-`dev:mock` も `dev:aws` も開発ビルド専用です。リリースビルドでは、
+### 自分専用の AWS 開発環境で試す
+
+```sh
+npm run dev-env -- up      # 初回だけ。上の「開発者ごとの AWS 開発環境」
+npm run dev:cloud
+```
+
+`npm run dev-env -- up` で作った自分の環境 (Cognito でログイン → STS → Bedrock / Code Interpreter、履歴は自分の API Gateway と DynamoDB) に向けて起動します。
+
+`dev:mock`、`dev:aws`、`dev:cloud` は開発ビルド専用です。リリースビルドでは、
 
 - ログインの省略 (`DEV_SKIP_LOGIN`、`OAUTH_ISSUER` 未設定) はできず、ログイン画面に設定エラーを出します
 - `OAUTH_ISSUER` は `https://` 必須なので、模擬サーバー (`http://127.0.0.1`) には向けられません
@@ -576,7 +623,8 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 | パス | 内容 |
 | --- | --- |
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
-| `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
+| `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` / `npm run dev:cloud` の起動スクリプト |
+| `app/desktop/dev/cloud-env.mjs` | 開発者ごとの AWS 開発環境を作る・消す (`npm run dev-env`) |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足

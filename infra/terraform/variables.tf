@@ -10,6 +10,21 @@ variable "name" {
   default     = "agui-rig"
 }
 
+# ---- 環境 (タグ) ----
+# 開発者ごとの開発環境は app/desktop の `npm run dev-env -- up` が environment = "dev"、owner = <ユーザ名> で作る
+
+variable "environment" {
+  description = "環境の名前 (全リソースの Environment タグ)。例: prod、dev"
+  type        = string
+  default     = "prod"
+}
+
+variable "owner" {
+  description = "この環境の持ち主 (全リソースの Owner タグ)。開発者ごとの環境ではユーザ名。空ならタグを付けない"
+  type        = string
+  default     = ""
+}
+
 # ---- ログイン (OpenID Connect) ----
 # 本番は Auth0 (oidc_issuer と oidc_client_id を指定)。開発は create_cognito = true で Cognito のユーザープールを作って使える
 
@@ -74,6 +89,12 @@ variable "table_name" {
   description = "チャット履歴の DynamoDB テーブル名"
   type        = string
   default     = "agui-rig-chat-history"
+}
+
+variable "point_in_time_recovery" {
+  description = "DynamoDB のポイントインタイムリカバリ (本番は true。使い捨ての開発環境は false で料金を抑える)"
+  type        = bool
+  default     = true
 }
 
 # ---- 利用料金 (任意)。langfuse_secret_arn が空なら作らない ----

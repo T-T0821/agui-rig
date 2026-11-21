@@ -25,7 +25,7 @@ resource "aws_dynamodb_table" "history" {
   }
 
   point_in_time_recovery {
-    enabled = true
+    enabled = var.point_in_time_recovery
   }
 
   server_side_encryption {

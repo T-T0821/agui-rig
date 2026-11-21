@@ -1,10 +1,11 @@
 // 開発用の起動スクリプト。
 //   npm run dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / API Gateway / Collector を全部そこへ向ける
 //   npm run dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
+//   npm run dev:cloud … `npm run dev-env -- up` で作った自分専用の AWS の開発環境 (Cognito でログイン) に向ける
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +26,10 @@ function exampleMcpConfig() {
   return path;
 }
 
-function tauriDev(env) {
-  const child = spawn("npx", ["tauri", "dev"], { cwd: root, stdio: "inherit", env: { ...process.env, ...env }, shell: isWindows });
+function tauriDev(env, unset = []) {
+  const merged = { ...process.env, ...env };
+  for (const key of unset) delete merged[key];
+  const child = spawn("npx", ["tauri", "dev"], { cwd: root, stdio: "inherit", env: merged, shell: isWindows });
   const stop = () => child.kill();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -73,7 +76,28 @@ if (mode === "mock") {
     MCP_CONFIG: process.env.MCP_CONFIG || exampleMcpConfig(),
   });
   child.on("exit", (code) => process.exit(code ?? 0));
+} else if (mode === "cloud") {
+  // dev/cloud-env.mjs (npm run dev-env -- up) が書いた、自分の開発環境の接続先
+  const file = join(root, ".dev-cloud.json");
+  if (!existsSync(file)) {
+    console.error("[dev] 自分の開発環境がありません。先に npm run dev-env -- up で作ってください");
+    process.exit(1);
+  }
+  const { DEV_ENV_USER: user, ...cloud } = JSON.parse(readFileSync(file, "utf8"));
+  console.error(`[dev] ${user} の開発環境 (${cloud.CHAT_API_URL}) に向けて起動します`);
+  const child = tauriDev(
+    {
+      ...cloud,
+      // 本物のログイン (Cognito) → STS → Bedrock / AgentCore
+      DEV_SKIP_LOGIN: "",
+      LLM_MODEL: "",
+      MCP_CONFIG: process.env.MCP_CONFIG || exampleMcpConfig(),
+    },
+    // 模擬サーバー向けのエンドポイントが環境に残っていれば外す (AWS SDK が直接読む)
+    ["AWS_ENDPOINT_URL_STS", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_ENDPOINT_URL_BEDROCK_AGENTCORE", "AWS_PROFILE"],
+  );
+  child.on("exit", (code) => process.exit(code ?? 0));
 } else {
-  console.error("使い方: node dev/run.mjs mock | aws");
+  console.error("使い方: node dev/run.mjs mock | aws | cloud");
   process.exit(1);
 }

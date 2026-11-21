@@ -1,3 +1,8 @@
+output "region" {
+  description = "アプリの AWS_REGION に設定する"
+  value       = var.region
+}
+
 output "chat_api_url" {
   description = "アプリの CHAT_API_URL に設定する (API Gateway の URL)"
   value       = aws_apigatewayv2_api.backend.api_endpoint
