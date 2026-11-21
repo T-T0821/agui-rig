@@ -9,6 +9,17 @@ React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ
 - **画面**: shadcn/ui (Tailwind CSS v4) と CopilotKit v2 のチャット。OS の設定に合わせてライト / ダークを切り替える
 - **画面との接続**: AG-UI プロトコル。フロントは `@ag-ui/client` の `HttpAgent` で Rust の AG-UI エンドポイントに直接つなぐ (CopilotKit の Node ランタイムは使わない)
 
+## 目次
+
+| 知りたいこと | 節 |
+| --- | --- |
+| 全体像 | [フォルダ構成](#フォルダ構成) ・ [アプリの構成](#アプリの構成) ・ [AWS 構成 (本番運用相当)](#aws-構成-本番運用相当) |
+| 環境を作る | [Auth0 の設定](#auth0-の設定) ・ [開発用のログイン (Cognito)](#開発用のログイン-cognito) ・ [AWS 側の準備 (Terraform)](#aws-側の準備-terraform) |
+| 動かす | [動かし方](#動かし方) (模擬 / 本物の AWS / 本物の環境) |
+| トレース・料金・上限 | [トレースと利用料金 (Langfuse)](#トレースと利用料金-langfuse) |
+| 配る | [配布するとき (設定の渡し方)](#配布するとき-設定の渡し方) |
+| その他 | [ファイル](#ファイル) ・ [補足](#補足) ・ [ライセンス](#ライセンス) |
+
 ## フォルダ構成
 
 ```
@@ -20,11 +31,11 @@ app/
   backend/        API Gateway から呼ばれる Lambda (TypeScript): チャット履歴と利用料金
 infra/
   terraform/      AWS のリソース (IAM、API Gateway、Lambda、DynamoDB)
-  otel-collector.yaml
+  otel-collector.yaml   OpenTelemetry Collector の設定 (リファレンス。デプロイは Langfuse 側のリポジトリ)
 docs/images/      README の図
 ```
 
-## 構成
+## アプリの構成
 
 ![アプリの中の構成図 (CopilotKit と Rust のつなぎ)](docs/images/app-architecture.png)
 
@@ -56,6 +67,8 @@ docs/images/      README の図
 
 </details>
 
+ログインからチャットまでの流れ:
+
 1. 「ログイン」で OS の既定ブラウザが開き、Auth0 でログインする。リダイレクトは `http://127.0.0.1:<port>/callback` で受ける (RFC 8252、クライアントシークレットなし)。
 2. Rust が ID トークンを STS に渡して一時認証情報を得る。期限前に SDK が自動で取り直し、ID トークンもリフレッシュトークンで自動更新する。**トークンと認証情報は Rust のメモリ上だけに置き、WebView には渡さない。**
 3. チャットを送ると、Rig がモデルを呼び、モデルがツールを呼べば実行して結果を返す、をツールを呼ばなくなるまで繰り返す (最大 10 回)。その様子は AG-UI のイベント (`TEXT_MESSAGE_*`、`TOOL_CALL_START / ARGS / END / RESULT`) で画面に流れ、ツール呼び出しはカードで表示される。
@@ -86,7 +99,7 @@ docs/images/      README の図
 - **最小権限**: アプリのロールは Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB や Langfuse のキーには触れない
 - **利用者の分離**: 履歴と利用料金は API Gateway の JWT オーソライザーが検証した `sub` だけで分けるので、ほかの人のデータに届かない
 - **監査とコスト**: 誰がいつ呼んだかは CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額の正は Cost Explorer、利用者別・会話別の内訳は Langfuse
-- **可観測性**: トレースは ID トークンを検証する OTel Collector 経由で、セルフホストの Langfuse に送る
+- **可観測性**: トレースは ID トークンを検証する OTel Collector 経由で、セルフホストの Langfuse に送る (EKS 上の Langfuse と Collector のデプロイは別リポジトリで管理)
 - **IaC**: AWS のリソースは `infra/terraform/` の Terraform で作る (下の「AWS 側の準備」)
 
 <details>
@@ -306,13 +319,30 @@ MCP_CONFIG=./mcp.json npm run tauri dev
 | `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
 | `CHAT_API_URL` | チャット履歴と利用料金の API (API Gateway の URL)。未設定なら使わない。ログインしていないとき (`dev:aws`) も使わない |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
-| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る (下記) |
+| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る ([トレースと利用料金](#トレースと利用料金-langfuse)) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
-| `TELEMETRY_AUTH` | `id_token` で、OTLP の送信にログイン中の ID トークンを付ける (Collector で検証する。下記) |
+| `TELEMETRY_AUTH` | `id_token` で、OTLP の送信にログイン中の ID トークンを付ける (Collector で検証する。[本番は Collector 経由](#本番は-collector-経由でid-トークンで認証して送る)) |
 | `TELEMETRY_RECORD_CONTENT` | `true` でプロンプト・回答・ツールの入出力もトレースに含める (既定は含めない。利用者 ID の `sub` は常に送る) |
 | `RUST_LOG` | ログの詳しさ (既定 `info`) |
 
-### トレース (Langfuse)
+### Anthropic API で動作確認する
+
+Bedrock の準備前に本物のモデルで試したい場合は、`.env` に次を書きます (`.env` はコミットされません)。
+
+```sh
+LLM_MODEL=anthropic/claude-sonnet-5-5
+ANTHROPIC_API_KEY=...
+```
+
+このとき OAuth を設定していなければ、Code Interpreter は無効になります (AWS の認証が無いため)。AWS の認証があるなら `CODE_INTERPRETER_ID=aws.codeinterpreter.v1` で有効にできます。
+
+### 模擬サーバーと AWS のエンドポイント
+
+`npm run dev:mock` の模擬サーバーは単体でも起動できます (`npm run mock-server`)。
+`MOCK_MONTHLY_LIMIT_USD=1.24 npm run dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
+AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
+
+## トレースと利用料金 (Langfuse)
 
 Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
 アプリはそれを OTLP/HTTP で Langfuse の `/api/public/otel/v1/traces` に送ります。
@@ -327,7 +357,7 @@ Langfuse での見え方:
 利用者 ID には ID トークンの `sub` (不透明な ID) を常に送ります。AWS の認証情報は送りません。
 ID トークンは、`TELEMETRY_AUTH=id_token` のときに Collector への認証ヘッダーとしてだけ使います (トレースの中身には入れません)。
 
-#### 料金の計測
+### 料金の計測
 
 モデル呼び出しのスパンには、トークン数を重ならない 4 つの区分に分けて載せています
 (`langfuse.observation.usage_details`)。Langfuse はこれにモデル定義の単価を掛けて、
@@ -362,7 +392,7 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 - Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。請求額は AWS の Cost Explorer が正です
 - 利用者 ID には ID トークンの `sub` を常に送ります (メールなどではない不透明な ID)。利用者別の集計と、画面の利用料金表示に使います
 
-#### 画面に利用料金を出す
+### 画面に利用料金を出す
 
 ログイン中は、ヘッダーに「今日 $x · 今月 $y」を出します (Langfuse が計算した推定額)。
 
@@ -379,7 +409,7 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 - 「今日」「今月」の区切りは `utc_offset_minutes` (既定 540 = 日本時間) です
 - Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
 
-#### 利用者ごとの利用上限とリセット
+### 利用者ごとの利用上限とリセット
 
 管理者が利用者ごとに月の利用上限 (USD、Langfuse の推定額) を決め、上限に達した利用者は新しいメッセージを送れなくなります。
 利用者のアプリからは上限を変えられません。
@@ -403,15 +433,23 @@ npm run limits -- list
 ```
 
 - `<sub>` は ID トークンの `sub` (Auth0 の user_id)。Langfuse の User ID と同じです
-- アプリが `/usage` を呼ぶたびに、Lambda が同じテーブルへ `sub`・利用者名・最新の料金 (`monthUsd`、`periodUsd`、`limitUsd`、`blocked`、`lastSeenAt`) を書きます。利用者名は検証済みの ID トークンの `name` (無ければ `nickname`、`cognito:username`、`email`) で、アプリから送られた値は使いません。`npm run limits -- list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
+- **利用状況の記録**: アプリが `/usage` を呼ぶたびに、Lambda が同じテーブルへ `sub`・利用者名・最新の料金を書きます
+  - 書く項目は `monthUsd`、`periodUsd`、`limitUsd`、`blocked`、`lastSeenAt`
+  - 利用者名は検証済みの ID トークンの `name` (無ければ `nickname`、`cognito:username`、`email`) で、アプリから送られた値は使いません
+  - `npm run limits -- list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
 - **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。Lambda が「月初からの料金」と上限を比べるだけなので、定期実行のジョブはありません
 - **手動リセット**: `reset` で `resetAt` に今の時刻が入り、今月はその時刻からの料金で比べます。翌月になると自然に月初からに戻ります
-- アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます (結果は 30 秒使い回し、上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます)。ヘッダーに「上限 $使用 / $上限」を、上限に近づくと警告、達すると赤い案内を出します
-- `/usage` を確かめられない (Langfuse の障害など) ときは止めません。また Langfuse の集計は遅れるので、上限を最大で 1〜2 回の実行分ほど超えることがあります
-- 上限の判定はアプリ (Rust) が行います。アプリは Bedrock を STS の一時認証情報で直接呼ぶので、改造したアプリなら上限を無視できます。確実に止めるには Bedrock の呼び出しをサーバー側 (API Gateway + Lambda など) に寄せる必要があります
+- **止め方**: アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます
+  - 結果は 30 秒使い回します。上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます
+  - ヘッダーに「上限 $使用 / $上限」を出し、上限に近づくと警告、達すると赤い案内を出します
+- **限界**:
+  - `/usage` を確かめられない (Langfuse の障害など) ときは止めません
+  - Langfuse の集計は遅れるので、上限を最大で 1〜2 回の実行分ほど超えることがあります
+  - 上限の判定はアプリ (Rust) が行います。アプリは Bedrock を STS の一時認証情報で直接呼ぶので、改造したアプリなら上限を無視できます。
+    確実に止めるには Bedrock の呼び出しをサーバー側 (API Gateway + Lambda など) に寄せる必要があります
 - Lambda のサブネットから DynamoDB に届く必要があります (DynamoDB のゲートウェイ型 VPC エンドポイントか NAT)
 
-#### 本番は Collector 経由で、ID トークンで認証して送る
+### 本番は Collector 経由で、ID トークンで認証して送る
 
 Langfuse のシークレットキーはプロジェクトのデータを読み書きできるので、利用者の PC には置きません。
 `LANGFUSE_*` を直接使うのは開発中だけにして、本番は EKS 上の OpenTelemetry Collector に送ります。
@@ -422,28 +460,24 @@ Langfuse のシークレットキーはプロジェクトのデータを読み�
 
 - アプリ: `OTEL_EXPORTER_OTLP_ENDPOINT=https://<Collector>` と `TELEMETRY_AUTH=id_token` を設定します (どちらも配布物に埋め込めます)。
   送るたびに、その時点の ID トークン (自動更新されたもの) を付けます。ログイン前のトレースは送りません
-- Collector: `infra/otel-collector.yaml` が設定例です (otelcol-contrib)。`oidc` 認証拡張で、ID トークンの署名・issuer・audience・期限を確かめます。
+- Collector: `infra/otel-collector.yaml` が設定のリファレンスです (otelcol-contrib。管理の分担は下記)。`oidc` 認証拡張で、ID トークンの署名・issuer・audience・期限を確かめます。
   利用者 ID (`langfuse.user.id`) は、アプリが送った値ではなく検証済みトークンの `sub` で上書きするので、他人の名前で料金を付けることはできません
 - Langfuse のキーは Collector にだけ渡します (Secrets Manager から External Secrets などで)
 - ID トークンが流れるので、Collector は TLS で受けてください。リリースビルドは `TELEMETRY_AUTH=id_token` のとき https 以外の送信先を拒否します
 - `npm run dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます
 
-### Anthropic API で動作確認する
+#### Collector の管理の分担
 
-Bedrock の準備前に本物のモデルで試したい場合は、`.env` に次を書きます (`.env` はコミットされません)。
+EKS 上の Langfuse は別のリポジトリで管理しています。Collector は次のように分けて持ちます。
 
-```sh
-LLM_MODEL=anthropic/claude-sonnet-5-5
-ANTHROPIC_API_KEY=...
-```
+| 持つもの | 管理する場所 | 理由 |
+| --- | --- | --- |
+| 受信の認証 (`oidc` の issuer と audience)、利用者 ID を `sub` で上書きする処理 (`attributes/user`) | **このリポジトリ** (`infra/otel-collector.yaml`) | このアプリの ID トークンと対になる決まりで、利用料金と利用上限の正しさを守るため。アプリの `TELEMETRY_AUTH` や送信先と一緒に変わる |
+| Kubernetes のマニフェスト / Helm、Ingress と TLS、Langfuse のキー (Secret)、Langfuse への送信先 URL | **Langfuse のリポジトリ** | EKS と Langfuse の都合で変わるため |
 
-このとき OAuth を設定していなければ、Code Interpreter は無効になります (AWS の認証が無いため)。AWS の認証があるなら `CODE_INTERPRETER_ID=aws.codeinterpreter.v1` で有効にできます。
-
-### 模擬サーバーと AWS のエンドポイント
-
-`npm run dev:mock` の模擬サーバーは単体でも起動できます (`npm run mock-server`)。
-`MOCK_MONTHLY_LIMIT_USD=1.24 npm run dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
-AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
+- `infra/otel-collector.yaml` は、そのままデプロイするものではなく、守ってほしい設定のリファレンスです。
+  Langfuse のリポジトリ側の Collector の設定に、受信 (`receivers.otlp` の `auth`)、`extensions.oidc`、`processors.attributes/user` を同じ内容で入れてください
+- issuer や Client ID、`attributes/user` を変えるときは、このリポジトリの yaml を先に直し、Langfuse のリポジトリに反映します
 
 ## 配布するとき (設定の渡し方)
 
@@ -481,38 +515,69 @@ $env:APP_CONFIG="config/prod.json"; npx tauri build
 
 ### 書けるキーと書けないキー
 
-- 書ける: `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE`、`BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`TELEMETRY_AUTH`、`RUST_LOG`
-- 書けない (秘密情報): `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`OTEL_EXPORTER_OTLP_HEADERS`、`ANTHROPIC_API_KEY`、AWS のアクセスキー
-  - ビルド時の設定に入っていると、ビルドが失敗します
-  - `config.json` に入っていると、無視して起動ログに書きます
+設定ファイル (ビルド時の設定と `config.json`) に書けるキー:
+
+| 分類 | キー |
+| --- | --- |
+| ログイン | `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`OAUTH_REDIRECT_HOST` |
+| AWS | `AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` |
+| モデルとツール | `BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG` |
+| 履歴と利用料金 | `CHAT_API_URL` |
+| トレース | `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`TELEMETRY_AUTH` |
+| ログ | `RUST_LOG` |
+
+書けないキー (秘密情報。環境変数でだけ渡す):
+`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS`、`ANTHROPIC_API_KEY`、AWS のアクセスキー (`AWS_ACCESS_KEY_ID` など)
+
+- 秘密情報がビルド時の設定に入っていると、ビルドが失敗します
+- 秘密情報が `config.json` に入っていると、無視して起動ログに書きます
 - 値はすべて文字列で書きます (`"true"`、`"53682"` など)
-- 一覧は `app/desktop/src-tauri/src/config_keys.rs` にあります
+- 一覧の元は `app/desktop/src-tauri/src/config_keys.rs` です
 
 起動時のログ (標準エラー) に、どのキーをどこから読んだかが出ます。値そのものは出しません。
 
 ## ファイル
+
+### 画面 (React)
 
 | パス | 内容 |
 | --- | --- |
 | `app/desktop/src/App.tsx` | ログイン画面、ヘッダー、会話一覧、CopilotKit (v2) と HttpAgent |
 | `app/desktop/src/ToolCallCard.tsx` | ツール呼び出しのカード表示 |
 | `app/desktop/src/components/ui/` / `app/desktop/src/index.css` / `app/desktop/components.json` | shadcn/ui の部品とテーマ。部品は `npx shadcn@latest add <名前>` で足せる |
-| `app/desktop/src-tauri/src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
-| `app/desktop/src-tauri/src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
-| `app/desktop/src-tauri/src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |
-| `app/desktop/src-tauri/src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
-| `app/desktop/src-tauri/src/tools/` | Code Interpreter と stdio MCP |
-| `app/desktop/src-tauri/src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
-| `app/desktop/src-tauri/src/config.rs` / `config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
-| `app/desktop/src-tauri/src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`)、実行前の利用上限の確認 |
-| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
+
+### Rust (Tauri)
+
+パスはどれも `app/desktop/src-tauri/` の下です。
+
+| パス | 内容 |
+| --- | --- |
+| `src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
+| `src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
+| `src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |
+| `src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
+| `src/tools/` | Code Interpreter と stdio MCP |
+| `src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
+| `src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`)、実行前の利用上限の確認 |
+| `src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
+| `src/config.rs` / `src/config_keys.rs` / `build.rs` | 設定の読み込み (環境変数 → config.json → ビルド時の設定) |
+
+### バックエンドとインフラ
+
+| パス | 内容 |
+| --- | --- |
 | `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限) |
 | `app/backend/scripts/limits.ts` | 管理者用 CLI (`npm run limits`): 利用者ごとの上限と手動リセット |
-| `infra/otel-collector.yaml` | EKS 上の OpenTelemetry Collector の設定例 (ID トークンで受けて Langfuse へ送る) |
-| `app/desktop/src-tauri/src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
-| `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
+| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
+| `infra/otel-collector.yaml` | OpenTelemetry Collector の設定のリファレンス (ID トークンで受けて Langfuse へ送る)。デプロイは Langfuse のリポジトリ |
+
+### 開発用
+
+| パス | 内容 |
+| --- | --- |
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
 | `app/desktop/dev/run.mjs` | `npm run dev:mock` / `npm run dev:aws` の起動スクリプト |
+| `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足
 

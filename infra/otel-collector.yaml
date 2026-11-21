@@ -1,4 +1,6 @@
-# OpenTelemetry Collector (contrib) の設定例。EKS 上で Langfuse の前に置く。
+# OpenTelemetry Collector (contrib) の設定のリファレンス。EKS 上で Langfuse の前に置く。
+# 実際のデプロイ (マニフェスト / Helm、Ingress と TLS、Langfuse のキー) は Langfuse のリポジトリで管理する。
+# 受信の認証 (oidc) と attributes/user は、このファイルと同じ内容にすること (README の「Collector の管理の分担」)。
 #
 #   アプリ ─(OTLP/HTTP + Authorization: Bearer <ID トークン>)→ この Collector ─(Langfuse のキー)→ Langfuse
 #
