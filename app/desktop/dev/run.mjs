@@ -1,7 +1,7 @@
 // 開発用の起動スクリプト。
 // ルート (リポジトリの一番上) で実行する。
-//   pnpm dev:mock  … 模擬サーバーを立てて、OAuth / STS / Bedrock / AgentCore / API Gateway / Collector を全部そこへ向ける
-//   pnpm dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を呼ぶ
+//   pnpm dev:mock  … 模擬サーバーを立てて、OAuth / API Gateway (履歴・利用料金・LLM プロキシ) / Collector を全部そこへ向ける
+//   pnpm dev:aws   … ログインを省略し、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) で本物の Bedrock を直接呼ぶ (プロキシを通さない)
 //   pnpm dev:cloud … `pnpm dev-env up` で作った自分専用の AWS の開発環境 (Cognito でログイン) に向ける
 // どちらも `tauri dev` (開発ビルド) で動く。リリースビルドでは、ログインの省略も http の模擬サーバーも使えない。
 
@@ -44,11 +44,11 @@ if (mode === "mock") {
   const { CLOUD_ENV_FILE, readCloudEnv } = await import("./env-file.mjs");
   const file = readCloudEnv();
   const cloud = Object.fromEntries(
-    ["OAUTH_ISSUER", "OAUTH_CLIENT_ID", "OAUTH_REDIRECT_PORT", "AWS_REGION", "AWS_ROLE_ARN", "CHAT_API_URL", "BEDROCK_MODEL_ID"]
+    ["OAUTH_ISSUER", "OAUTH_CLIENT_ID", "OAUTH_REDIRECT_PORT", "CHAT_API_URL", "BEDROCK_MODEL_ID"]
       .map((k) => [k, process.env[k] ?? file[k]])
       .filter(([, v]) => v),
   );
-  if (!cloud.CHAT_API_URL || !cloud.AWS_ROLE_ARN) {
+  if (!cloud.CHAT_API_URL) {
     console.error(`[dev] ${CLOUD_ENV_FILE} に自分の開発環境の接続先がありません。先にルートで pnpm dev-env up を実行してください`);
     process.exit(1);
   }
@@ -56,13 +56,13 @@ if (mode === "mock") {
   const child = tauriDev(
     {
       ...cloud,
-      // 本物のログイン (Cognito) → STS → Bedrock / AgentCore
+      // 本物のログイン (Cognito) → ID トークンで API Gateway (LLM プロキシ → Bedrock / AgentCore)
       DEV_SKIP_LOGIN: "",
       LLM_MODEL: "",
       MCP_CONFIG: process.env.MCP_CONFIG || exampleMcpConfig(),
     },
-    // 模擬サーバー向けのエンドポイントが環境に残っていれば外す (AWS SDK が直接読む)
-    ["AWS_ENDPOINT_URL_STS", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_ENDPOINT_URL_BEDROCK_AGENTCORE", "AWS_PROFILE"],
+    // ログイン中のアプリは AWS の認証情報を使わないので、念のため外す
+    ["AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
   );
   child.on("exit", (code) => process.exit(code ?? 0));
 } else {

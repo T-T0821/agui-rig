@@ -4,6 +4,7 @@ mod auth;
 mod aws;
 mod config;
 mod history;
+mod proxy;
 mod server;
 mod telemetry;
 mod tools;
@@ -22,8 +23,8 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::OnceCell;
 
 use agent::Runtime;
-use auth::{OAuthClient, OAuthConfig, Session};
-use aws::{AwsSettings, IdToken};
+use auth::{IdToken, OAuthClient, OAuthConfig, Session};
+use proxy::{LlmProxy, ModelSource};
 use server::SharedRuntime;
 use tools::Tools;
 use tools::code_interpreter::CodeInterpreter;
@@ -31,13 +32,14 @@ use tools::mcp::McpHub;
 use history::{History, ThreadSummary, Usage};
 
 /// 既定のモデル (推論プロファイル ID)。`BEDROCK_MODEL_ID` で上書きできる。
+/// ログイン中はプロキシに渡すモデル名で、プロキシの許可リスト (Terraform の model_prices) に載っている必要がある。
 const DEFAULT_MODEL: &str = "global.anthropic.claude-sonnet-5-5";
-/// 既定の Code Interpreter (AWS マネージド)。`CODE_INTERPRETER_ID` で上書き、`off` で無効。
+/// 開発モードで直接呼ぶ Code Interpreter (AWS マネージド)。`CODE_INTERPRETER_ID` で上書き、`off` で無効。
+/// ログイン中 (プロキシ経由) は、どれを使うかはプロキシ側の設定で決まる (`off` で無効にだけできる)。
 const DEFAULT_CODE_INTERPRETER: &str = "aws.codeinterpreter.v1";
 
 struct AppState {
     endpoint: AgentEndpoint,
-    aws: AwsSettings,
     /// Auth0。開発モードと設定エラーのときは None
     oauth: Option<Arc<OAuthClient>>,
     /// ログインなしで、AWS SDK 標準の認証 (AWS_PROFILE / SSO など) を使う開発モード。開発ビルドだけ
@@ -77,44 +79,53 @@ fn status(state: &AppState) -> AuthStatus {
     }
 }
 
-/// 認証情報からモデルとツールを組み立てる。
-/// `user_id` は ID トークンの sub (開発モードでは None)。トレースの利用者 ID になる。
-async fn build_runtime(
-    state: &AppState,
-    token: Option<(IdToken, String)>,
-    user_id: Option<String>,
-) -> Result<Arc<Runtime>, String> {
-    // チャット履歴 (API Gateway)。ID トークンで認証するので、ログインしているときだけ。CHAT_API_URL が無ければ保存しない
-    let history = std::env::var("CHAT_API_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .zip(token.as_ref().map(|(t, _)| t.clone()))
-        .map(|(url, token)| Arc::new(History::new(url, token)));
-    let config = aws::sdk_config(&state.aws, token).await?;
+/// バックエンドの URL (API Gateway。チャット履歴・利用料金・LLM プロキシの共通の入口)。
+fn api_url() -> Option<String> {
+    std::env::var("CHAT_API_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
+}
 
+/// モデルとツールを組み立てる。
+/// - ログイン中 (`token` あり): モデルも Code Interpreter もバックエンドの LLM プロキシ経由。AWS の認証情報は使わない
+/// - 開発モード (`token` なし、開発ビルドだけ): 開発者自身の AWS 認証で Bedrock / Code Interpreter を直接呼ぶ (または LLM_MODEL)
+///
+/// `user_id` は ID トークンの sub (開発モードでは None)。トレースの利用者 ID になる。
+async fn build_runtime(state: &AppState, token: Option<IdToken>, user_id: Option<String>) -> Result<Arc<Runtime>, String> {
+    let model_id = std::env::var("BEDROCK_MODEL_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_MODEL.into());
+    let ci_setting = std::env::var("CODE_INTERPRETER_ID").ok().filter(|s| !s.is_empty());
+    let mcp = state.mcp.get_or_init(|| async { Arc::new(McpHub::empty()) }).await.clone();
+
+    if let Some(token) = token {
+        let url = api_url().ok_or("CHAT_API_URL (バックエンドの URL) が設定されていません")?;
+        // ID トークンを付けて送るので、リリースビルドでは https 以外に送らない
+        if !cfg!(debug_assertions) && !url.starts_with("https://") {
+            return Err("CHAT_API_URL は https:// で始まる必要があります".into());
+        }
+        let history = Some(Arc::new(History::new(url.clone(), token.clone())));
+        let model = ModelSource::Proxy(LlmProxy::new(&url, model_id, token.clone()));
+        let code_interpreter = (ci_setting.as_deref() != Some("off")).then(|| Arc::new(CodeInterpreter::proxy(&url, token)));
+        return Ok(Arc::new(Runtime { model, tools: Tools { code_interpreter, mcp }, user_id, history }));
+    }
+
+    // ---- 開発モード (開発ビルドで OAuth 未設定か DEV_SKIP_LOGIN): ログインしないので、履歴とプロキシは使わない ----
+    if !state.dev_mode {
+        return Err("ログインしていません".into());
+    }
+    let config = aws::dev_sdk_config().await;
     // 動作確認用: LLM_MODEL (vendor/model 形式、例: anthropic/claude-sonnet-5-5) があれば
-    // Bedrock ではなくそのプロバイダーを使う。API キーは ANTHROPIC_API_KEY などから読まれる。
-    // LLM_MODEL は開発ビルドだけ (配布物では必ず Bedrock を使う)
+    // Bedrock ではなくそのプロバイダーを使う。API キーは ANTHROPIC_API_KEY などから読まれる
     let test_model = std::env::var("LLM_MODEL").ok().filter(|s| cfg!(debug_assertions) && !s.is_empty());
     let model: DynModel<Completion> = match &test_model {
         Some(reference) => Catalog::builtin()
             .connect(reference.as_str())
             .map_err(|e| format!("モデル {reference} に接続できません: {e}"))?,
-        None => {
-            let model_id = std::env::var("BEDROCK_MODEL_ID").unwrap_or_else(|_| DEFAULT_MODEL.into());
-            BedrockRuntime::from(aws_sdk_bedrockruntime::Client::new(&config)).completion(model_id).into()
-        }
+        None => BedrockRuntime::from(aws_sdk_bedrockruntime::Client::new(&config)).completion(model_id).into(),
     };
-
-    // Code Interpreter は AWS のサービス。LLM_MODEL を使い、かつ OAuth も無い (AWS の認証が無いことが多い)
-    // ときは、CODE_INTERPRETER_ID を明示しない限り無効にする
-    let ci_default = if test_model.is_some() && state.dev_mode { "off" } else { DEFAULT_CODE_INTERPRETER };
-    let ci_id = std::env::var("CODE_INTERPRETER_ID").unwrap_or_else(|_| ci_default.into());
+    // LLM_MODEL を使うときは AWS の認証が無いことが多いので、CODE_INTERPRETER_ID を明示しない限り無効にする
+    let ci_default = if test_model.is_some() { "off" } else { DEFAULT_CODE_INTERPRETER };
+    let ci_id = ci_setting.unwrap_or_else(|| ci_default.into());
     let code_interpreter = (ci_id != "off")
-        .then(|| Arc::new(CodeInterpreter::new(aws_sdk_bedrockagentcore::Client::new(&config), ci_id)));
-
-    let mcp = state.mcp.get_or_init(|| async { Arc::new(McpHub::empty()) }).await.clone();
-    Ok(Arc::new(Runtime { model: Arc::new(model), tools: Tools { code_interpreter, mcp }, user_id, history }))
+        .then(|| Arc::new(CodeInterpreter::direct(aws_sdk_bedrockagentcore::Client::new(&config), ci_id)));
+    Ok(Arc::new(Runtime { model: ModelSource::Fixed(Arc::new(model)), tools: Tools { code_interpreter, mcp }, user_id: None, history: None }))
 }
 
 /// 実行環境を差し替える。古い Code Interpreter のセッションは止める。
@@ -175,7 +186,7 @@ fn auth_status(state: State<'_, AppState>) -> AuthStatus {
     status(&state)
 }
 
-/// Auth0 でログインし、ID トークン → STS の一時認証情報で Bedrock などを使えるようにする。
+/// Auth0 (開発は Cognito) でログインする。以後、バックエンド (履歴・利用料金・LLM プロキシ) を ID トークンで呼ぶ。
 #[tauri::command]
 async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus, String> {
     let oauth = state
@@ -191,7 +202,7 @@ async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<AuthStatus,
         })
         .await?;
     let id_token = IdToken::new(session.id_token.clone());
-    let runtime = build_runtime(&state, Some((id_token.clone(), session.principal.clone())), Some(session.sub.clone())).await?;
+    let runtime = build_runtime(&state, Some(id_token.clone()), Some(session.sub.clone())).await?;
     replace_runtime(&state.runtime, Some(runtime));
     *state.session.lock().unwrap() = Some(session);
     telemetry::set_id_token(Some(id_token.clone()));
@@ -211,7 +222,7 @@ fn logout(state: State<'_, AppState>) -> AuthStatus {
 }
 
 /// ID トークンの期限前に、リフレッシュトークンで更新し続ける。
-/// 新しい ID トークンは、次に STS を呼ぶとき (一時認証情報の期限前) に使われる。
+/// 新しい ID トークンは、次のバックエンドの呼び出しから使われる。
 /// 更新できなければログアウト扱いにして、フロントに知らせる。
 fn start_refresh(app: &AppHandle, state: &AppState, id_token: IdToken) {
     let Some(oauth) = state.oauth.clone() else { return };
@@ -303,7 +314,6 @@ pub fn run() {
         .setup(move |app| {
             app.manage(AppState {
                 endpoint: AgentEndpoint { url: format!("http://{addr}/agent"), token },
-                aws: AwsSettings::from_env(),
                 oauth: auth_mode.oauth.map(|c| Arc::new(OAuthClient::new(c))),
                 dev_mode: auth_mode.dev_mode,
                 config_error: auth_mode.error,

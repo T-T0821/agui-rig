@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handler, parseSaveBody } from "../src/history.ts";
 import { subOf, userNameOf } from "../src/http.ts";
-import { evaluate, periodStartOf, periodStarts, resolveLimit } from "../src/usage.ts";
+import { evaluate, ledgerKeys, periodStartOf, periodStarts, resolveLimit, summarize } from "../src/ledger.ts";
 
 test("PUT の本文を確かめる", () => {
   assert.deepEqual(parseSaveBody(JSON.stringify({ title: "t", messagesGz: "H4sI" }), false), { title: "t", messagesGz: "H4sI" });
@@ -15,18 +15,17 @@ test("PUT の本文を確かめる", () => {
 });
 
 test("sub が無ければ 401、ID が不正なら 400", async () => {
-  const base = { routeKey: "GET /threads/{id}", isBase64Encoded: false, requestContext: { authorizer: { jwt: { claims: {} } } } };
+  const base = { httpMethod: "GET", resource: "/threads/{id}", isBase64Encoded: false, requestContext: { authorizer: {} } };
   assert.equal((await handler(base as never)).statusCode, 401);
-  const withSub = { ...base, requestContext: { authorizer: { jwt: { claims: { sub: "auth0|1" } } } }, pathParameters: { id: "../x" } };
+  const withSub = { ...base, requestContext: { authorizer: { sub: "auth0|1" } }, pathParameters: { id: "../x" } };
   assert.equal((await handler(withSub as never)).statusCode, 400);
 });
 
-test("ID トークンだけを認める (Cognito のアクセストークンは token_use で弾く)", () => {
-  const ev = (claims: Record<string, unknown>) => ({ requestContext: { authorizer: { jwt: { claims } } } }) as never;
-  assert.equal(subOf(ev({ sub: "auth0|1" })), "auth0|1");
-  assert.equal(subOf(ev({ sub: "u-1", token_use: "id" })), "u-1");
-  assert.equal(subOf(ev({ sub: "u-1", token_use: "access", client_id: "c" })), undefined);
+test("sub はオーソライザーが渡した値だけを使う", () => {
+  const ev = (authorizer: Record<string, unknown>) => ({ requestContext: { authorizer } }) as never;
+  assert.equal(subOf(ev({ sub: "auth0|1", principalId: "auth0|1" })), "auth0|1");
   assert.equal(subOf(ev({ sub: "" })), undefined);
+  assert.equal(subOf(ev({ principalId: "x" })), undefined);
   assert.equal(subOf({ requestContext: {} } as never), undefined);
 });
 
@@ -61,10 +60,29 @@ test("上限との比較", () => {
   assert.deepEqual(evaluate(10, 10, 0.8), { warn: true, blocked: true });
 });
 
-test("利用者名は検証済みのクレームから", () => {
-  const ev = (claims: Record<string, unknown>) => ({ requestContext: { authorizer: { jwt: { claims } } } }) as never;
-  assert.equal(userNameOf(ev({ sub: "a", name: "山田 太郎", email: "t@example.com" })), "山田 太郎");
-  assert.equal(userNameOf(ev({ sub: "a", "cognito:username": "taro" })), "taro");
-  assert.equal(userNameOf(ev({ sub: "a", email: "t@example.com" })), "t@example.com");
-  assert.equal(userNameOf(ev({ sub: "a", name: "  " })), undefined);
+test("利用者名はオーソライザーが渡した値から", () => {
+  const ev = (authorizer: Record<string, unknown>) => ({ requestContext: { authorizer } }) as never;
+  assert.equal(userNameOf(ev({ sub: "a", userName: "山田 太郎" })), "山田 太郎");
+  assert.equal(userNameOf(ev({ sub: "a", userName: "  " })), undefined);
+  assert.equal(userNameOf(ev({ sub: "a" })), undefined);
+});
+
+test("台帳のキーは日本時間の月と日", () => {
+  assert.deepEqual(ledgerKeys(new Date("2026-11-30T15:30:00Z"), 540), { month: "M#2026-12", day: "D#2026-12-01" });
+  assert.deepEqual(ledgerKeys(new Date("2026-11-30T14:59:00Z"), 540), { month: "M#2026-11", day: "D#2026-11-30" });
+});
+
+test("台帳の金額から /usage の応答を作る (手動リセット後はリセット時点の金額を引く)", () => {
+  const now = new Date("2026-11-20T00:00:00Z");
+  const opts = { offset: 540, defaultLimitUsd: 10, warnRatio: 0.8 };
+  const plain = summarize(now, { todayUsd: 1, monthUsd: 9 }, {}, opts);
+  assert.equal(plain.monthStart, "2026-10-31T15:00:00.000Z");
+  assert.deepEqual([plain.periodUsd, plain.limitUsd, plain.warn, plain.blocked], [9, 10, true, false]);
+  const blocked = summarize(now, { todayUsd: 1, monthUsd: 12 }, {}, opts);
+  assert.equal(blocked.blocked, true);
+  const reset = summarize(now, { todayUsd: 1, monthUsd: 12 }, { resetAt: "2026-11-10T00:00:00.000Z", resetBaseUsd: 11 }, opts);
+  assert.deepEqual([reset.periodStart, reset.periodUsd, reset.blocked], ["2026-11-10T00:00:00.000Z", 1, false]);
+  // 先月のリセットは無視する (月初で自動で戻る)
+  const old = summarize(now, { todayUsd: 1, monthUsd: 3 }, { resetAt: "2026-10-10T00:00:00.000Z", resetBaseUsd: 50 }, opts);
+  assert.equal(old.periodUsd, 3);
 });

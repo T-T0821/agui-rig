@@ -4,27 +4,27 @@ output "region" {
 }
 
 output "chat_api_url" {
-  description = "アプリの CHAT_API_URL に設定する (API Gateway の URL)"
-  value       = aws_apigatewayv2_api.backend.api_endpoint
+  description = "アプリの CHAT_API_URL に設定する (API Gateway の URL。チャット履歴・利用料金・LLM プロキシ /v1 の共通の入口)"
+  value       = aws_api_gateway_stage.api.invoke_url
 }
 
-output "app_role_arn" {
-  description = "アプリの AWS_ROLE_ARN に設定する"
-  value       = aws_iam_role.app.arn
+output "allowed_models" {
+  description = "プロキシで呼べるモデル (アプリの BEDROCK_MODEL_ID はこのどれか)"
+  value       = keys(var.model_prices)
 }
 
 output "table_name" {
   value = aws_dynamodb_table.history.name
 }
 
-output "usage_enabled" {
-  description = "利用料金の機能を作ったか"
-  value       = local.usage_enabled
+output "limits_table_name" {
+  description = "利用上限のテーブル (pnpm limits の LIMITS_TABLE)"
+  value       = aws_dynamodb_table.limits.name
 }
 
-output "limits_table_name" {
-  description = "利用上限のテーブル (pnpm limits の LIMITS_TABLE)。利用料金を作らなければ null"
-  value       = local.usage_enabled ? aws_dynamodb_table.limits[0].name : null
+output "usage_table_name" {
+  description = "利用料金の台帳 (pnpm limits reset の USAGE_TABLE)"
+  value       = aws_dynamodb_table.usage.name
 }
 
 output "oauth_issuer" {

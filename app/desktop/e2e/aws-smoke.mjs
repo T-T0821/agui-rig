@@ -5,10 +5,12 @@
 // 使う認証は AWS SDK 標準 (AWS_PROFILE / SSO / 環境変数のキーなど)。`pnpm dev:aws` と同じ。
 // 確かめること:
 //   1. STS          … 認証情報が有効か (GetCallerIdentity)
-//   2. Bedrock      … BEDROCK_MODEL_ID のモデルを呼べるか (最大 16 トークンだけ。数円未満の費用がかかる)
+//   2. Bedrock      … BEDROCK_MODEL_ID のモデルを直接呼べるか (最大 16 トークンだけ。数円未満の費用がかかる)
 //   3. AgentCore    … Code Interpreter のセッションを開始 → print(1 + 1) を実行 → 終了 (CODE_INTERPRETER_ID=off で省略)
-//   4. API Gateway  … CHAT_API_URL があれば、トークンなしで 401 になる (JWT オーソライザーが効いている) こと。
-//                      ID_TOKEN (ログインで得た ID トークン) も渡せば、/threads と /usage が 200 になること
+//   (1〜3 は開発モード (pnpm dev:aws) の直接呼び出しの確認。ログインして使うアプリは AWS を直接呼ばない)
+//   4. API Gateway  … CHAT_API_URL があれば、トークンなしで 401 になる (Lambda オーソライザーが効いている) こと。
+//                      ID_TOKEN (ログインで得た ID トークン) も渡せば、/threads と /usage が 200 になり、
+//                      LLM プロキシ (/v1/chat/completions) と Code Interpreter の中継 (/v1/code-interpreter) も呼べること
 // 設定は環境変数のほか、app/desktop/.env とルートの .env.cloud も読む (環境変数が優先)。
 // pnpm dev-env up で自分の開発環境を作っていれば、CHAT_API_URL は .env.cloud から入る。
 
@@ -119,6 +121,34 @@ for (const path of ["/threads", "/usage"]) {
     return Array.isArray(body) ? `${body.length} 件` : JSON.stringify(body).slice(0, 160);
   });
 }
+
+await check("LLM プロキシ: /v1/chat/completions (ID トークン)", async () => {
+  if (!chatApiUrl || !idToken) return SKIP;
+  const r = await fetch(`${chatApiUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${idToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: modelId, max_tokens: 16, messages: [{ role: "user", content: "「OK」とだけ返してください。" }] }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const body = await r.json();
+  return `「${body.choices?.[0]?.message?.content?.trim()}」 (入力 ${body.usage?.prompt_tokens} / 出力 ${body.usage?.completion_tokens} トークン)`;
+});
+
+await check("LLM プロキシ: Code Interpreter の中継 (ID トークン)", async () => {
+  if (!chatApiUrl || !idToken || codeInterpreterId === "off") return SKIP;
+  const headers = { Authorization: `Bearer ${idToken}`, "content-type": "application/json" };
+  const r = await fetch(`${chatApiUrl}/v1/code-interpreter/invoke`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId: "smoke-test", tool: "executeCode", arguments: { language: "python", code: "print(1 + 1)" } }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const body = await r.json();
+  await fetch(`${chatApiUrl}/v1/code-interpreter/stop`, { method: "POST", headers, body: JSON.stringify({ sessionId: body.sessionId }) });
+  const stdout = body.result?.stdout?.trim();
+  if (stdout !== "2") throw new Error(`出力が想定と違います: ${JSON.stringify(body).slice(0, 200)}`);
+  return `print(1 + 1) → ${stdout}`;
+});
 
 const ng = results.filter((r) => r.status === "NG").length;
 const ok = results.filter((r) => r.status === "OK").length;

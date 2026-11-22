@@ -3,20 +3,22 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "API Gateway (HTTP API + JWT オーソライザー) から呼ばれる Lambda: チャット履歴と利用料金・利用上限",
+  "description": "API Gateway (REST API + ID トークンのオーソライザー) から呼ばれる Lambda: チャット履歴・利用料金と利用上限・LLM プロキシ",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "esbuild src/history.ts src/usage.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --external:@aws-sdk/*",
+    "build": "esbuild src/history.ts src/usage.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --external:@aws-sdk/* && esbuild src/authorizer.ts src/proxy.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "limits": "node --experimental-strip-types scripts/limits.ts"
   },
   "devDependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "^3.1175.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1175.0",
     "@aws-sdk/client-dynamodb": "^3.1173.0",
-    "@aws-sdk/client-secrets-manager": "^3.1173.0",
     "@aws-sdk/lib-dynamodb": "^3.1173.0",
     "@types/aws-lambda": "^8.10.164",
     "@types/node": "^22.20.5",
     "esbuild": "^0.28.2",
+    "jose": "^6.2.18",
     "typescript": "^7.0.2"
   }
 }

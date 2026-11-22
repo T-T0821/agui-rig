@@ -1,4 +1,4 @@
-// チャット履歴: API Gateway (JWT オーソライザー) → この Lambda → DynamoDB
+// チャット履歴: API Gateway (REST API + ID トークンのオーソライザー) → この Lambda → DynamoDB
 //   GET    /threads        自分の会話の一覧
 //   GET    /threads/{id}   会話 1 件 (無ければ 404)
 //   PUT    /threads/{id}   保存 (上書き) { title, messagesGz }
@@ -6,7 +6,7 @@
 // pk はオーソライザーが検証した sub だけ。他人の会話を指定する方法は無い。
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { type Event, type Result, error, json, noContent, subOf } from "./http.ts";
+import { type Event, type Result, error, json, noContent, routeOf, subOf } from "./http.ts";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const table = () => process.env.TABLE_NAME ?? "";
@@ -42,7 +42,7 @@ export async function handler(event: Event): Promise<Result> {
   const id = event.pathParameters?.id;
   if (id !== undefined && !ID_PATTERN.test(id)) return error(400, "会話 ID が不正です");
 
-  switch (event.routeKey) {
+  switch (routeOf(event)) {
     case "GET /threads": {
       const out = await db.send(
         new QueryCommand({
@@ -63,7 +63,7 @@ export async function handler(event: Event): Promise<Result> {
       return json(200, { id: i.sk, title: i.title, updatedAt: i.updatedAt, messagesGz: i.messagesGz });
     }
     case "PUT /threads/{id}": {
-      const body = parseSaveBody(event.body, event.isBase64Encoded);
+      const body = parseSaveBody(event.body ?? undefined, event.isBase64Encoded);
       if (typeof body === "string") return error(400, body);
       const now = new Date().toISOString();
       await db.send(

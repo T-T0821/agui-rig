@@ -1,4 +1,4 @@
-//! Rig (Bedrock) のツールループ。ストリームを AG-UI イベントに変換しながら、
+//! Rig のツールループ (モデルは、ログイン中はバックエンドの LLM プロキシ経由の Bedrock、開発モードでは直接)。ストリームを AG-UI イベントに変換しながら、
 //! モデルがツールを呼ばなくなるまで「生成 → ツール実行 → 結果を返す」を繰り返す。
 
 use std::collections::HashMap;
@@ -6,16 +6,15 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use tracing::{Instrument, field::Empty};
-use rig_core::DynModel;
 use rig_core::completion::message::{AssistantContent, AssistantMessage, ToolResultContent};
 use rig_core::completion::{CompletionRequest, Message};
-use rig_core::operation::Completion;
 use rig_core::streaming::{Item, PartKind, StreamEvent};
 use rig_core::telemetry::{self as telemetry_content, completion_parent_span};
 
 use crate::agui::{Event, RunAgentInput};
 use crate::telemetry;
 use crate::history::History;
+use crate::proxy::ModelSource;
 use crate::tools::Tools;
 
 const SYSTEM_PROMPT: &str = "あなたは親切なアシスタントです。日本語で簡潔に答えてください。\
@@ -27,7 +26,7 @@ const MAX_STEPS: usize = 10;
 
 /// 1 回分の実行に必要なもの。
 pub struct Runtime {
-    pub model: Arc<DynModel<Completion>>,
+    pub model: ModelSource,
     pub tools: Tools,
     /// トレースに載せる利用者 ID (ID トークンの sub。メールなどではない不透明な ID)。開発モードでは None。
     /// 利用料金を利用者ごとに集計するキーなので、本文の記録設定に関係なく常に送る
@@ -189,7 +188,7 @@ async fn run_loop(
         );
         telemetry_content::record_model_input(&generation, &history, content);
 
-        let mut stream = generation.in_scope(|| runtime.model.stream(request).map_err(|e| e.to_string()))?;
+        let mut stream = generation.in_scope(|| runtime.model.get().stream(request).map_err(|e| e.to_string()))?;
 
         // パート (テキスト / ツール呼び出し) ごとに AG-UI の ID を振る
         let message_id = uuid::Uuid::new_v4().to_string();

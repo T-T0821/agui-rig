@@ -1,5 +1,5 @@
 # 開発用のログイン (任意): Cognito のユーザープール。create_cognito = true のときだけ作る。
-# Auth0 と同じく OpenID Connect の ID トークンを出すので、STS、API Gateway の JWT オーソライザー、Collector はそのまま使える。
+# Auth0 と同じく OpenID Connect の ID トークンを出すので、API Gateway のオーソライザーと Collector はそのまま使える。
 #   issuer = https://cognito-idp.<リージョン>.amazonaws.com/<プール ID> (末尾に / は付かない)、aud = アプリクライアント ID
 # 利用者は管理者が作る (自分でサインアップはできない): aws cognito-idp admin-create-user ...
 

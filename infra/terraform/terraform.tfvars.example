@@ -13,22 +13,23 @@ oidc_client_id = "your-client-id"
 # create_cognito = true
 # cognito_domain_prefix = "agui-rig-dev-xxxx"  # 空なら <name>-<アカウント ID>
 
-# 同じ issuer の IAM OIDC プロバイダーが既にあれば false
-# create_oidc_provider = false
+# プロキシで呼べるモデルと単価 (100 万トークンあたりの USD)。載っていないモデルは呼べない。Bedrock の料金ページで確かめて入れる
+# model_prices = {
+#   "global.anthropic.claude-sonnet-5-5" = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 }
+#   "<別のモデルの推論プロファイル ID>"    = { input = <入力の単価>, output = <出力の単価> }
+# }
+# max_output_tokens = 16384
 
-# 呼べるモデルを絞る (おすすめ)
+# プロキシの Lambda が呼べるモデルを IAM でも絞る (おすすめ)
 # bedrock_model_arns = [
 #   "arn:aws:bedrock:ap-northeast-1:123456789012:inference-profile/global.anthropic.claude-sonnet-5-5",
 #   "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5-5*",
 # ]
 
-# 利用料金 (任意)。シークレットの中身は {"publicKey": "pk-lf-...", "secretKey": "sk-lf-..."}
-# langfuse_secret_arn       = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:agui-rig/langfuse-xxxxxx"
-# langfuse_host             = "http://internal-langfuse-123456.ap-northeast-1.elb.amazonaws.com"
-# lambda_subnet_ids         = ["subnet-aaaa", "subnet-bbbb"]
-# lambda_security_group_ids = ["sg-cccc"]
-
-# 利用上限 (利用料金を作ったときだけ)。1 人あたりの月の上限 USD、0 なら上限なし。
-# 個別の上限・手動リセットは app/backend で LIMITS_TABLE=$(terraform output -raw limits_table_name) npm run limits -- ...
+# 利用上限。1 人あたりの月の上限 USD、0 なら上限なし。
+# 個別の上限・手動リセットは リポジトリのルートで LIMITS_TABLE=$(terraform -chdir=infra/terraform output -raw limits_table_name) pnpm limits ...
 # default_monthly_limit_usd = 30
 # limit_warn_ratio          = 0.8
+
+# プロキシの同時実行数の上限 (全利用者の合計、-1 で設定しない)
+# proxy_reserved_concurrency = 50

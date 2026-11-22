@@ -32,15 +32,12 @@ export function mockEnv(base) {
     OAUTH_ISSUER: base,
     OAUTH_CLIENT_ID: "chat-app",
     DEV_SKIP_LOGIN: "",
-    AWS_REGION: "ap-northeast-1",
-    AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/mock-chat",
-    AWS_ENDPOINT_URL_STS: base,
-    AWS_ENDPOINT_URL_BEDROCK_RUNTIME: base,
-    AWS_ENDPOINT_URL_BEDROCK_AGENTCORE: base,
+    // ログイン中は AWS を直接呼ばない (モデルも Code Interpreter も CHAT_API_URL のプロキシ経由)
     BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-5-5",
     CODE_INTERPRETER_ID: "aws.codeinterpreter.v1",
     LLM_MODEL: "",
     MCP_CONFIG: exampleMcpConfig(),
+    // バックエンド (履歴・利用料金・LLM プロキシ・Code Interpreter の中継)
     CHAT_API_URL: `${base}/api`,
     // トレースは本番と同じく Collector へ、ID トークンで認証して送る (Langfuse のキーはアプリに渡さない)
     LANGFUSE_PUBLIC_KEY: "",
