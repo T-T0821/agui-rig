@@ -41,10 +41,13 @@ resource "aws_apigatewayv2_api" "backend" {
   description   = "agui-rig のバックエンド (チャット履歴・利用料金)"
 }
 
-# Auth0 の ID トークンを検証する (署名・iss・aud・有効期限)。Lambda には検証済みのクレームが渡る
+# ID トークン (Auth0 / Cognito) を検証する (署名・iss・aud・有効期限)。JWKS は issuer の discovery から自動で引く。
+# Lambda には検証済みのクレームが渡る。HTTP API の JWT オーソライザーは Cognito の token_use を見ず、
+# Cognito のアクセストークン (client_id = audience) も通すので、Lambda 側 (app/backend/src/http.ts の subOf) で
+# token_use が "id" 以外のトークンを 401 にしている
 resource "aws_apigatewayv2_authorizer" "id_token" {
   api_id           = aws_apigatewayv2_api.backend.id
-  name             = "auth0-id-token"
+  name             = "id-token"
   authorizer_type  = "JWT"
   identity_sources = ["$request.header.Authorization"]
 

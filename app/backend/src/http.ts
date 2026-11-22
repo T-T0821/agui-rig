@@ -4,9 +4,18 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructured
 export type Event = APIGatewayProxyEventV2WithJWTAuthorizer;
 export type Result = APIGatewayProxyStructuredResultV2;
 
-/** JWT オーソライザーが検証した ID トークンの sub。利用者を分けるのはこれだけ (リクエストの中身は信用しない) */
+/**
+ * JWT オーソライザーが検証した ID トークンの sub。利用者を分けるのはこれだけ (リクエストの中身は信用しない)。
+ * HTTP API の JWT オーソライザーは署名・iss・aud (Cognito のアクセストークンなら client_id)・exp を確かめるが、
+ * Cognito 独自の token_use は見ない。この API は ID トークンだけを受け付けるので、token_use があって "id" 以外
+ * (Cognito のアクセストークン) なら認めない。Auth0 の ID トークンには token_use が無いのでそのまま通る。
+ */
 export function subOf(event: Event): string | undefined {
-  const sub = event.requestContext.authorizer?.jwt?.claims?.sub;
+  const claims = event.requestContext.authorizer?.jwt?.claims;
+  if (!claims) return undefined;
+  const tokenUse = claims["token_use"];
+  if (tokenUse !== undefined && tokenUse !== "id") return undefined;
+  const sub = claims.sub;
   return typeof sub === "string" && sub !== "" ? sub : undefined;
 }
 
