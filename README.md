@@ -328,6 +328,8 @@ CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
 | `pnpm dev:cloud` | 自分専用の AWS 開発環境に向けて起動 |
 | `pnpm tauri <引数>` | `app/desktop` で Tauri CLI を実行 (`pnpm tauri dev`、`pnpm tauri build` など) |
 | `pnpm mock-server` | 模擬サーバーだけを起動 |
+| `pnpm e2e` / `pnpm e2e:aws` | E2E テスト (模擬環境 / 本物の AWS)。[E2E テスト](#e2e-テスト-模擬環境) |
+| `pnpm smoke:aws` | 本物の AWS への疎通確認。[疎通確認](#本物の-aws-への疎通確認) |
 | `pnpm desktop:build` | 画面 (Vite) のビルド |
 | `pnpm backend:build` / `backend:test` / `backend:typecheck` | バックエンドの Lambda のビルド・テスト・型チェック |
 | `pnpm limits <サブコマンド>` | 利用上限の管理 ([利用上限](#トレースと利用料金-langfuse)) |
@@ -424,6 +426,52 @@ ANTHROPIC_API_KEY=...
 `pnpm dev:mock` の模擬サーバーは単体でも起動できます (`pnpm mock-server`)。
 `MOCK_MONTHLY_LIMIT_USD=1.24 pnpm dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
 AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
+
+### E2E テスト (模擬環境)
+
+`app/desktop/e2e/` に、開発ビルドのアプリを [tauri-driver](https://v2.tauri.app/develop/tests/webdriver/) (WebDriver) で操作する E2E テストがあります。
+`pnpm dev:mock` と同じ模擬サーバーに向けて、次の流れを確かめます。
+
+1. ログイン画面から模擬の Auth0 でログインする (ブラウザの代わりに、認可 URL のリダイレクトをたどるだけの `xdg-open` を使う)
+2. メッセージを送り、MCP の時刻ツール → Code Interpreter → 回答 まで表示される
+3. 会話が履歴に保存され、「新しい会話」から戻って開き直せる
+4. 利用料金がヘッダーに出て、上限に近づくと警告、達すると送れない (上限は模擬サーバーの `PUT /__mock/config` で切り替える)
+
+```sh
+# Linux (Ubuntu) の例。Tauri の前提パッケージに加えて WebKitWebDriver と Xvfb が要る
+# (WebKitWebDriver のパッケージは Ubuntu 24.04 までは webkit2gtk-driver、新しい版は webkitgtk-webdriver)
+sudo apt-get install -y webkit2gtk-driver xvfb ffmpeg fonts-noto-cjk
+cargo install tauri-driver --locked
+
+pnpm install
+pnpm tauri build --debug --no-bundle
+xvfb-run -a -s "-screen 0 1280x800x24" pnpm e2e
+```
+
+スクリーンショットと録画 (ffmpeg があるとき) は `app/desktop/e2e/artifacts/` に出ます。
+CI (`.github/workflows/e2e.yml`) でも Ubuntu で動かし、成果物 `e2e-artifacts` に残します。
+macOS には WebDriver が無いため、tauri-driver の E2E は Linux と Windows だけで動きます。
+
+### 本物の AWS への疎通確認
+
+`pnpm smoke:aws` で、アプリが使う AWS のサービスを 1 つずつ最小の呼び出しで確かめます。
+認証は AWS SDK 標準 (`AWS_PROFILE`、SSO など) で、`pnpm dev:aws` と同じです。`app/desktop/.env` と、ルートの `.env.cloud` も読みます
+(`pnpm dev-env up` で自分の開発環境を作っていれば、`AWS_PROFILE` と `CHAT_API_URL` はそこから入ります)。
+
+```sh
+AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm smoke:aws
+# API Gateway の認証付きの呼び出しまで確かめるなら、ログインで得た ID トークンを ID_TOKEN で渡す
+```
+
+| 確認 | 内容 |
+| --- | --- |
+| STS | 認証情報が有効か (GetCallerIdentity) |
+| Bedrock | `BEDROCK_MODEL_ID` のモデルを最大 16 トークンで呼ぶ (わずかに費用がかかる) |
+| AgentCore | Code Interpreter のセッションを開始し、`print(1 + 1)` を実行して終了する (`CODE_INTERPRETER_ID=off` で省略) |
+| API Gateway | `CHAT_API_URL` があれば、トークンなしで 401 になること。`ID_TOKEN` もあれば `/threads` と `/usage` が 200 になること |
+
+画面まで含めて確かめるなら、Linux では `pnpm e2e:aws` で、`dev:aws` と同じ設定 (ログインなし) のアプリに
+「Code Interpreter で計算して」と送り、本物のモデルの回答を待つ E2E も動かせます (費用がかかります)。
 
 ## トレースと利用料金 (Langfuse)
 
@@ -659,7 +707,10 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 | --- | --- |
 | `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
 | `app/desktop/dev/run.mjs` | `pnpm dev:mock` / `pnpm dev:aws` / `pnpm dev:cloud` の起動スクリプト |
+| `app/desktop/dev/mock-env.mjs` | アプリを模擬サーバーに向ける環境変数 (`dev:mock` と E2E テストで共通) |
 | `app/desktop/dev/cloud-env.mjs` | 開発者ごとの AWS 開発環境を作る・消す (`pnpm dev-env`) |
+| `app/desktop/e2e/` | E2E テスト (tauri-driver + WebdriverIO、模擬環境 / 本物の AWS) と AWS の疎通確認 (`aws-smoke.mjs`) |
+| `.github/workflows/e2e.yml` | E2E テストの CI |
 | `app/desktop/examples/time-mcp/` | 動作確認用の stdio MCP サーバー |
 
 ## 補足
