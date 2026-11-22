@@ -22,7 +22,7 @@ use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::aws::IdToken;
+use crate::auth::IdToken;
 
 /// gzip + base64 後の上限 (DynamoDB の項目の上限 400KB から、ほかの属性の分を引いた値)。
 const MAX_ENCODED_BYTES: usize = 350_000;

@@ -3,12 +3,9 @@ terraform {
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.0"
-    }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
+      source = "hashicorp/aws"
+      # 6.26 以上: API Gateway の統合の response_transfer_mode (レスポンスストリーミング)
+      version = ">= 6.26, < 7.0"
     }
     archive = {
       source  = "hashicorp/archive"

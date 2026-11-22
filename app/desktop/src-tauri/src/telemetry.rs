@@ -32,7 +32,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::aws::IdToken;
+use crate::auth::IdToken;
 
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static RECORD_CONTENT: OnceLock<bool> = OnceLock::new();

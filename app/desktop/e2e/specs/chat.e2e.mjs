@@ -1,6 +1,6 @@
 import { allByText, button, byText, relogin, screenshot, send, setMock } from "./helpers.mjs";
 
-const ANSWER = "Bedrock の模擬応答です";
+const ANSWER = "LLM プロキシの模擬応答です";
 
 describe("模擬環境: ログイン → チャット (ツール) → 履歴 → 利用料金と上限", () => {
   before(async () => {
@@ -13,7 +13,7 @@ describe("模擬環境: ログイン → チャット (ツール) → 履歴 →
     await login.waitForClickable();
     await screenshot("login");
     await login.click();
-    // 模擬サーバーがすぐにリダイレクトし、ID トークン → STS まで済むと利用者名が出る
+    // 模擬サーバーがすぐにリダイレクトし、ID トークンを受け取ると利用者名が出る
     await (await byText("模擬 太郎")).waitForDisplayed();
     await (await button("ログアウト")).waitForDisplayed();
     await screenshot("logged-in");

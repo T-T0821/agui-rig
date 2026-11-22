@@ -9,18 +9,19 @@ resource "aws_iam_policy" "boundary" {
     Version = "2012-10-17"
     Statement = [
       {
-        # アプリのロール: Bedrock と AgentCore Code Interpreter
-        Sid      = "AppBedrock"
+        # LLM プロキシの Lambda: Bedrock と AgentCore Code Interpreter
+        Sid      = "ProxyBedrock"
         Effect   = "Allow"
         Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
         Resource = "*"
       },
       {
-        Sid    = "AppCodeInterpreter"
+        Sid    = "ProxyCodeInterpreter"
         Effect = "Allow"
         Action = [
           "bedrock-agentcore:StartCodeInterpreterSession",
           "bedrock-agentcore:InvokeCodeInterpreter",
+          "bedrock-agentcore:GetCodeInterpreterSession",
           "bedrock-agentcore:StopCodeInterpreterSession",
         ]
         Resource = "*"
@@ -29,7 +30,7 @@ resource "aws_iam_policy" "boundary" {
         # Lambda: 自分の環境のテーブルだけ
         Sid      = "LambdaTables"
         Effect   = "Allow"
-        Action   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+        Action   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:*:${local.account_id}:table/${var.name_prefix}-*"
       },
       {

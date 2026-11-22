@@ -123,7 +123,7 @@ function stackVars(user, region) {
     "-var=create_cognito=true",
     "-var=environment=dev",
     `-var=owner=${user}`,
-    // 使い捨てなので PITR は切る。利用料金 (Langfuse・VPC が要る) は作らない
+    // 使い捨てなので PITR は切る (利用料金の台帳と上限は、本番と同じく作られる)
     "-var=point_in_time_recovery=false",
     // 開発用アカウントの権限セットは、権限の上限つきのロールしか作れない (infra/dev-account)
     ...(process.env.DEV_ENV_PERMISSIONS_BOUNDARY ? [`-var=permissions_boundary_arn=${process.env.DEV_ENV_PERMISSIONS_BOUNDARY}`] : []),
@@ -206,10 +206,10 @@ function writeCloudEnv(user, email, out) {
     OAUTH_ISSUER: out.oauth_issuer,
     OAUTH_CLIENT_ID: out.oauth_client_id,
     OAUTH_REDIRECT_PORT: "53682",
-    AWS_ROLE_ARN: out.app_role_arn,
     CHAT_API_URL: out.chat_api_url,
   };
-  updateCloudEnv(values);
+  // 以前の構成 (STS で AWS を直接呼ぶ) の名残があれば消す
+  updateCloudEnv({ ...values, AWS_ROLE_ARN: undefined });
   return values;
 }
 

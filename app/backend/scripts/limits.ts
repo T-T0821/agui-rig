@@ -8,12 +8,15 @@
 //   pnpm limits reset   <sub>        今この時点から数え直す (今月のここまでの使用額を 0 として扱う)
 //   pnpm limits unreset <sub>        手動リセットを取り消す (月初から数える)
 //
-// テーブル名は LIMITS_TABLE (terraform output -raw limits_table_name)。
+// テーブル名は LIMITS_TABLE (terraform output -raw limits_table_name) と、reset で使う台帳の USAGE_TABLE
+// (terraform output -raw usage_table_name)。
 // <sub> は ID トークンの sub (Auth0 の user_id、例 "auth0|abc..."。Langfuse の User ID と同じ)。
-// 月初には何もしなくても自動で数え直される (Lambda は月初からの料金と上限を比べるため)。
+// 月初には何もしなくても自動で数え直される (台帳は月ごとに分かれているため)。
+// reset は、その時点の今月の料金を resetBaseUsd に記録し、以後はそれを引いた分を上限と比べる。
 // userName・lastSeenAt・monthUsd などは、アプリが /usage を呼ぶたびに Lambda が書く (表示用、ここでは変えない)。
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { ledgerKeys } from "../src/ledger.ts";
 
 const table = process.env.LIMITS_TABLE;
 const [command, sub, value] = process.argv.slice(2);
@@ -92,13 +95,29 @@ async function main(): Promise<void> {
       console.log(`${sub}: 既定の上限に戻しました`);
       return;
     case "reset": {
-      const now = new Date().toISOString();
-      await setAttribute(sub, "resetAt", now);
-      console.log(`${sub}: ${now} から数え直します (アプリには 30 秒ほどで反映されます)`);
+      const usageTable = process.env.USAGE_TABLE;
+      if (!usageTable) {
+        console.error("reset には USAGE_TABLE も設定してください (terraform output -raw usage_table_name)");
+        process.exit(2);
+      }
+      const now = new Date();
+      const { month } = ledgerKeys(now, Number(process.env.UTC_OFFSET_MINUTES ?? 540));
+      const got = await db.send(new GetCommand({ TableName: usageTable, Key: { pk: sub, sk: month } }));
+      const base = Number(got.Item?.costUsd ?? 0);
+      await db.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { pk: sub },
+          UpdateExpression: "SET resetAt = :at, resetBaseUsd = :base, updatedAt = :at",
+          ExpressionAttributeValues: { ":at": now.toISOString(), ":base": base },
+        }),
+      );
+      console.log(`${sub}: ${now.toISOString()} から数え直します (今月のここまでの $${base.toFixed(4)} を除く。次のメッセージから反映)`);
       return;
     }
     case "unreset":
       await removeAttribute(sub, "resetAt");
+      await removeAttribute(sub, "resetBaseUsd");
       console.log(`${sub}: 手動リセットを取り消しました (月初から数えます)`);
       return;
     default:

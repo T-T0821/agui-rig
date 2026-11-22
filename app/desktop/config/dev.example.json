@@ -2,8 +2,7 @@
   "OAUTH_ISSUER": "https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_XXXXXXXXX",
   "OAUTH_CLIENT_ID": "your-cognito-app-client-id",
   "OAUTH_REDIRECT_PORT": "53682",
-  "AWS_REGION": "ap-northeast-1",
-  "AWS_ROLE_ARN": "arn:aws:iam::210987654321:role/chat-app-bedrock-dev",
+  "CHAT_API_URL": "https://yyyyyyyyyy.execute-api.ap-northeast-1.amazonaws.com/api",
   "BEDROCK_MODEL_ID": "global.anthropic.claude-sonnet-5-5",
   "TELEMETRY_RECORD_CONTENT": "true"
 }

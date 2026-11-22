@@ -1,5 +1,5 @@
 // E2E テスト: 開発ビルドのアプリ (Tauri) を tauri-driver (WebDriver) で操作する。
-// OAuth / STS / Bedrock / AgentCore / API Gateway / Collector はすべて dev/mock-server.mjs の模擬。
+// OAuth / API Gateway (履歴・利用料金・LLM プロキシ・Code Interpreter の中継) / Collector はすべて dev/mock-server.mjs の模擬。
 //
 // 事前に (ルートで): pnpm install && pnpm tauri build --debug --no-bundle と cargo install tauri-driver
 // Linux では WebKitWebDriver (webkit2gtk-driver) も要る。画面の無い環境では xvfb-run で動かす。

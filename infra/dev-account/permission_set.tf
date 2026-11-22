@@ -1,7 +1,7 @@
 # 開発者用の IAM Identity Center の権限セット。開発者は aws sso login でこの権限で開発用アカウントに入り、
 # pnpm dev-env で自分の環境 (agui-rig-dev-<名前>) を作る・消す。できるのは:
-#   - agui-rig-dev-* の IAM ロール (権限の上限つきでだけ作れる)、Cognito の OIDC プロバイダー
-#   - agui-rig-dev-* の Lambda と DynamoDB、API Gateway (HTTP API)、Cognito
+#   - agui-rig-dev-* の IAM ロール (権限の上限つきでだけ作れる)
+#   - agui-rig-dev-* の Lambda と DynamoDB、API Gateway (REST API)、Cognito
 #   - state のバケットの読み書き、Lambda のログの閲覧、タグでの検索
 #   - (allow_bedrock) 自分の認証での Bedrock と Code Interpreter (pnpm dev:aws)
 
@@ -55,20 +55,9 @@ locals {
       }
     },
     {
-      Sid    = "CognitoOidcProviders"
-      Effect = "Allow"
-      Action = [
-        "iam:CreateOpenIDConnectProvider", "iam:GetOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider",
-        "iam:TagOpenIDConnectProvider", "iam:UntagOpenIDConnectProvider", "iam:ListOpenIDConnectProviderTags",
-        "iam:UpdateOpenIDConnectProviderThumbprint",
-        "iam:AddClientIDToOpenIDConnectProvider", "iam:RemoveClientIDFromOpenIDConnectProvider",
-      ]
-      Resource = "arn:aws:iam::${local.acct}:oidc-provider/cognito-idp.*.amazonaws.com/*"
-    },
-    {
       Sid      = "IamRead"
       Effect   = "Allow"
-      Action   = ["iam:ListRoles", "iam:ListOpenIDConnectProviders", "iam:GetPolicy", "iam:GetPolicyVersion"]
+      Action   = ["iam:ListRoles", "iam:GetPolicy", "iam:GetPolicyVersion"]
       Resource = "*"
     },
     {
@@ -108,13 +97,13 @@ locals {
       Resource = "*"
     },
     {
-      # HTTP API は名前ではなく ID の ARN なので、API Gateway v2 の範囲で許す
-      Sid    = "HttpApis"
+      # REST API は名前ではなく ID の ARN なので、REST API の範囲で許す
+      Sid    = "RestApis"
       Effect = "Allow"
       Action = ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE"]
       Resource = [
-        "arn:aws:apigateway:*::/apis",
-        "arn:aws:apigateway:*::/apis/*",
+        "arn:aws:apigateway:*::/restapis",
+        "arn:aws:apigateway:*::/restapis/*",
         "arn:aws:apigateway:*::/tags/*",
       ]
     },

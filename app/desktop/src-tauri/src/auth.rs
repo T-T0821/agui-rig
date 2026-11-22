@@ -6,6 +6,7 @@
 //!
 //! 取得したトークンは Rust のメモリ上だけに置き、WebView には渡さない。
 
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -15,6 +16,24 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+/// ログイン中ユーザーの ID トークン。リフレッシュで差し替わる。
+/// バックエンド (API Gateway) への全ての呼び出し (履歴・利用料金・LLM プロキシ・Code Interpreter) と、
+/// Collector へのトレースの送信に、その時点のトークンを `Authorization: Bearer` で付ける。
+#[derive(Clone, Debug, Default)]
+pub struct IdToken(Arc<RwLock<String>>);
+
+impl IdToken {
+    pub fn new(token: String) -> Self {
+        Self(Arc::new(RwLock::new(token)))
+    }
+    pub fn set(&self, token: String) {
+        *self.0.write().unwrap() = token;
+    }
+    pub fn get(&self) -> String {
+        self.0.read().unwrap().clone()
+    }
+}
 
 /// `.env` などから読む OAuth の設定。
 #[derive(Clone)]
@@ -120,8 +139,6 @@ pub struct Session {
     pub refresh_token: Option<String>,
     /// 画面に出す名前 (ID トークンの name / email / sub)
     pub user: String,
-    /// AWS のロールセッション名に使う ID (email / preferred_username / sub)
-    pub principal: String,
     /// ID トークンの sub (利用者の不変の ID)。トレースの利用者 ID に使い、利用料金の集計キーになる
     pub sub: String,
     /// ID トークンの有効期限 (UNIX 秒)
@@ -137,18 +154,12 @@ impl Session {
             .find_map(|k| claims.get(*k).and_then(|v| v.as_str()))
             .unwrap_or("user")
             .to_string();
-        let principal = ["email", "preferred_username", "sub"]
-            .iter()
-            .find_map(|k| claims.get(*k).and_then(|v| v.as_str()))
-            .unwrap_or("user")
-            .to_string();
         let sub = claims.get("sub").and_then(|v| v.as_str()).ok_or("ID トークンに sub がありません")?.to_string();
         let expires_at = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(now() + 3600);
         Ok(Self {
             id_token,
             refresh_token: tokens.refresh_token.or(previous_refresh),
             user,
-            principal,
             sub,
             expires_at,
         })

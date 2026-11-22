@@ -2,10 +2,11 @@
 
 React + CopilotKit のチャット UI を Tauri 2 のデスクトップアプリ (Windows / macOS / Linux) に載せ、エージェントを Rust の Rig で動かすアプリです。
 
-- **モデル**: Amazon Bedrock (Rig の `rig-bedrock`)
-- **認証**: Auth0 (OpenID Connect) でログインし、ID トークンを STS `AssumeRoleWithWebIdentity` で一時 IAM 認証情報に交換。長期のアクセスキーは使わない
-- **ツール**: Amazon Bedrock AgentCore Code Interpreter と、PC 上で起動する stdio MCP サーバー
-- **チャット履歴**: API Gateway (HTTP API + JWT オーソライザー) → Lambda 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
+- **モデル**: Amazon Bedrock。アプリは Bedrock を直接呼ばず、自前の **LLM プロキシ** (API Gateway → Lambda) を OpenAI 互換の Chat Completions で呼ぶ (Rig の OpenAI 互換プロバイダー)
+- **認証**: Auth0 (OpenID Connect) でログインし、その **ID トークンだけ**でバックエンドを呼ぶ。**PC は AWS の認証情報を一切持たない**
+- **利用上限**: プロキシがサーバー側で料金を記録し、上限に達した利用者のモデル呼び出しを断る。アプリを改造しても迂回できない
+- **ツール**: Amazon Bedrock AgentCore Code Interpreter (プロキシ経由) と、PC 上で起動する stdio MCP サーバー
+- **チャット履歴**: 同じ API Gateway (REST API + Lambda オーソライザー) → Lambda 経由で DynamoDB に保存。利用者は自分の会話だけを読み書きできる
 - **画面**: shadcn/ui (Tailwind CSS v4) と CopilotKit v2 のチャット。OS の設定に合わせてライト / ダークを切り替える
 - **画面との接続**: AG-UI プロトコル。フロントは `@ag-ui/client` の `HttpAgent` で Rust の AG-UI エンドポイントに直接つなぐ (CopilotKit の Node ランタイムは使わない)
 
@@ -28,11 +29,11 @@ pnpm-workspace.yaml   pnpm workspace (app/desktop、app/desktop/examples/time-mc
 app/
   desktop/        デスクトップアプリ (Tauri)
     src/          画面 (React + CopilotKit + shadcn/ui)
-    src-tauri/    Rust (Rig のエージェント、ログイン、AWS の呼び出し)
+    src-tauri/    Rust (Rig のエージェント、ログイン、バックエンドの呼び出し)
     dev/          模擬サーバーと開発用の起動スクリプト
-  backend/        API Gateway から呼ばれる Lambda (TypeScript): チャット履歴と利用料金
+  backend/        API Gateway から呼ばれる Lambda (TypeScript): LLM プロキシ、オーソライザー、チャット履歴、利用料金
 infra/
-  terraform/      AWS のリソース (IAM、API Gateway、Lambda、DynamoDB)
+  terraform/      AWS のリソース (API Gateway、Lambda、DynamoDB、Cognito (開発用))
   dev-account/    開発用アカウントの初期設定 (開発者の権限セット、state のバケット、権限の上限)
   otel-collector.yaml   OpenTelemetry Collector の設定 (リファレンス。デプロイは Langfuse 側のリポジトリ)
 docs/images/      README の図
@@ -58,12 +59,9 @@ docs/images/      README の図
 │ WebView (React)                    Rust                                     │
 │  CopilotChat ─ HttpAgent ─ POST /agent ─▶ axum (127.0.0.1) ─ AG-UI / SSE    │
 │  ログイン画面 ─ invoke("login") ────────▶ OAuth (PKCE) ── ブラウザでログイン │
-│                                           │ ID トークン                      │
-│                                           ▼                                 │
-│                                  STS AssumeRoleWithWebIdentity              │
-│                                           │ 一時 IAM 認証情報                │
-│                       Rig のツールループ ─┼─▶ Bedrock (ConverseStream)      │
-│                                           ├─▶ AgentCore Code Interpreter    │
+│                                           │ ID トークン (メモリだけ)         │
+│                       Rig のツールループ ─┼─▶ LLM プロキシ /v1/chat/completions ─▶ (AWS) Bedrock
+│                                           ├─▶ LLM プロキシ /v1/code-interpreter ─▶ (AWS) AgentCore
 │                                           └─▶ stdio MCP サーバー (子プロセス)│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -73,24 +71,26 @@ docs/images/      README の図
 ログインからチャットまでの流れ:
 
 1. 「ログイン」で OS の既定ブラウザが開き、Auth0 でログインする。リダイレクトは `http://127.0.0.1:<port>/callback` で受ける (RFC 8252、クライアントシークレットなし)。
-2. Rust が ID トークンを STS に渡して一時認証情報を得る。期限前に SDK が自動で取り直し、ID トークンもリフレッシュトークンで自動更新する。**トークンと認証情報は Rust のメモリ上だけに置き、WebView には渡さない。**
-3. チャットを送ると、Rig がモデルを呼び、モデルがツールを呼べば実行して結果を返す、をツールを呼ばなくなるまで繰り返す (最大 10 回)。その様子は AG-UI のイベント (`TEXT_MESSAGE_*`、`TOOL_CALL_START / ARGS / END / RESULT`) で画面に流れ、ツール呼び出しはカードで表示される。
+2. 以後、Rust は ID トークンを `Authorization: Bearer` に付けてバックエンド (API Gateway) を呼ぶ。ID トークンはリフレッシュトークンで期限前に自動更新する。**トークンは Rust のメモリ上だけに置き、WebView には渡さない。AWS の認証情報はアプリのどこにも無い。**
+3. チャットを送ると、Rig がモデル (LLM プロキシ) を呼び、モデルがツールを呼べば実行して結果を返す、をツールを呼ばなくなるまで繰り返す (最大 10 回)。その様子は AG-UI のイベント (`TEXT_MESSAGE_*`、`TOOL_CALL_START / ARGS / END / RESULT`) で画面に流れ、ツール呼び出しはカードで表示される。
 
 ### ツール
 
 | ツール名 (モデルから見える名前) | 内容 |
 | --- | --- |
-| `code_interpreter_execute_code` | AgentCore Code Interpreter でコードを実行 (Python / JavaScript / TypeScript) |
+| `code_interpreter_execute_code` | AgentCore Code Interpreter でコードを実行 (Python / JavaScript / TypeScript)。ログイン中はプロキシ経由 |
 | `code_interpreter_execute_command` | 同じサンドボックスでシェルコマンドを実行 |
 | `<サーバー名>__<ツール名>` | mcp.json に書いた stdio MCP サーバーのツール |
 
 - Code Interpreter のセッションはチャットのスレッドごとに 1 つ作るので、同じスレッドでは変数やファイルが引き継がれる。ログアウトやアプリ終了で止める。
+  プロキシ経由のときは、セッションを作るのも使うのもプロキシで、ほかの利用者のセッションは使えない (セッション名に利用者のハッシュを入れて確かめる)。
 - MCP サーバーはアプリ起動時に子プロセスとして起動し、終了時に止める。**AWS の認証情報などを渡さないよう、環境変数は `PATH` など最小限だけ引き継ぐ** (必要なものは mcp.json の `env` に書く)。Windows では `npx` などのバッチファイルも動くよう `cmd /C` 経由で、コンソールウィンドウを出さずに起動する。
 
 ## AWS 構成 (本番運用相当)
 
 このリポジトリの AWS 構成は、検証用の簡易版ではなく**本番運用相当の構成**です。
-アプリ用のサーバーは置かず、各 PC のアプリの Rust 側だけが AWS を直接呼びます。画面 (React) はクラウドに直接つながりません。
+各 PC のアプリ (Rust) は、ID トークンで **1 つの API Gateway** を呼ぶだけです。Bedrock と AgentCore Code Interpreter を呼ぶのはサーバー側の LLM プロキシ (Lambda) だけで、
+PC には AWS の認証情報も Langfuse のキーも置きません。画面 (React) はクラウドに直接つながりません。
 
 ![agui-rig の AWS 構成図 (本番運用相当)](docs/images/aws-architecture.png)
 
@@ -98,11 +98,13 @@ docs/images/      README の図
 
 本番運用相当にしている点:
 
-- **長期キーなし**: ログインした ID トークンを STS で最大 1 時間の一時認証情報に替え、自動で更新する。トークンと認証情報は Rust のメモリだけに置き、画面にも PC のファイルにも残さない
-- **最小権限**: アプリのロールは Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB や Langfuse のキーには触れない
-- **利用者の分離**: 履歴と利用料金は API Gateway の JWT オーソライザーが検証した `sub` だけで分けるので、ほかの人のデータに届かない
-- **監査とコスト**: 誰がいつ呼んだかは CloudTrail (ロールセッション名 `chat-<email または sub>`)、請求額の正は Cost Explorer、利用者別・会話別の内訳は Langfuse
-- **可観測性**: トレースは ID トークンを検証する OTel Collector 経由で、セルフホストの Langfuse に送る (EKS 上の Langfuse と Collector のデプロイは別リポジトリで管理)
+- **PC に AWS の認証情報なし**: アプリが持つのはログインの ID トークン (1 時間、自動更新) だけ。IAM ロールも STS も使わないので、PC から AWS の API は呼べない
+- **迂回できない利用上限**: LLM プロキシが呼ぶ前に台帳で上限を確かめ (達していれば 429)、Bedrock が返したトークン数 × 単価で料金を DynamoDB に足す。アプリを改造しても上限を越えて呼べない
+- **呼べるモデルと出力の制限**: プロキシは `model_prices` に載っているモデルだけを呼び、出力トークンを `max_output_tokens` で切り詰める
+- **最小権限**: Bedrock と AgentCore の権限はプロキシの Lambda のロールだけが持つ。履歴・利用料金の Lambda はそれぞれのテーブルだけ
+- **利用者の分離**: 全ルートで同じ Lambda オーソライザーが ID トークンを検証し、検証済みの `sub` だけで履歴・料金・Code Interpreter のセッションを分ける
+- **監査とコスト**: 呼び出しごとに利用者・モデル・トークン数・料金・所要時間をプロキシが CloudWatch Logs に 1 行の JSON で出す (本文は出さない)。請求額の正は Cost Explorer、会話別の内訳は Langfuse
+- **可観測性**: トレースは今まで通り、アプリから ID トークンを検証する OTel Collector 経由でセルフホストの Langfuse に送る (EKS 上の Langfuse と Collector のデプロイは別リポジトリで管理)
 - **IaC**: AWS のリソースは `infra/terraform/` の Terraform で作る (下の「AWS 側の準備」)
 
 <details>
@@ -111,38 +113,45 @@ docs/images/      README の図
 ```mermaid
 flowchart LR
   subgraph PC["利用者の PC"]
-    App["Tauri アプリ (Rust)<br/>トークンと一時認証情報はメモリだけ"]
+    App["Tauri アプリ (Rust)<br/>ID トークンはメモリだけ<br/>AWS の認証情報なし"]
   end
   IdP["Auth0 (OIDC)"]
   subgraph AWS["AWS アカウント"]
-    STS["STS<br/>AssumeRoleWithWebIdentity"]
-    IAM["IAM<br/>OIDC プロバイダー + ロール"]
+    APIGW["API Gateway (REST API)<br/>Lambda オーソライザー"]
+    Authz["Lambda<br/>オーソライザー (JWKS で検証)"]
+    Proxy["Lambda<br/>LLM プロキシ (ストリーミング)"]
+    History["Lambda<br/>チャット履歴"]
+    Usage["Lambda<br/>利用料金"]
     Bedrock["Bedrock Runtime<br/>ConverseStream"]
     CI["AgentCore<br/>Code Interpreter"]
-    APIGW["API Gateway<br/>HTTP API (JWT オーソライザー)"]
-    History["Lambda<br/>チャット履歴"]
     DDB[("DynamoDB<br/>チャット履歴")]
+    Ledger[("DynamoDB<br/>利用料金の台帳")]
+    Limits[("DynamoDB<br/>利用上限")]
+    Logs["CloudWatch Logs<br/>呼び出しログ"]
     subgraph EKS["EKS"]
       Collector["OTel Collector"]
       Langfuse["Langfuse"]
     end
   end
   App -- "① PKCE ログイン" --> IdP
-  App -- "② ID トークン" --> STS
-  STS -. "信頼を確認" .-> IAM
-  STS -. "JWKS で検証" .-> IdP
-  App -- "③ SigV4 (一時認証情報)" --> Bedrock
-  App -- "④ SigV4" --> CI
-  App -- "⑤ ID トークン" --> APIGW
-  APIGW -. "JWKS で検証" .-> IdP
-  APIGW -- "/threads (sub)" --> History
+  App -- "② /v1/chat/completions<br/>/v1/code-interpreter (ID トークン)" --> APIGW
+  App -- "③ /threads (ID トークン)" --> APIGW
+  App -- "④ /usage (ID トークン)" --> APIGW
+  APIGW -. "トークンを検証" .-> Authz
+  Authz -. "JWKS" .-> IdP
+  APIGW -- "STREAM" --> Proxy
+  Proxy -- "上限を確認" --> Limits
+  Proxy -- "料金を足す" --> Ledger
+  Proxy --> Bedrock
+  Proxy --> CI
+  Proxy --> Logs
+  APIGW --> History
   History -- "sub ごとに読み書き" --> DDB
-  APIGW -- "⑥ /usage (sub)" --> Usage["Lambda (VPC)<br/>利用料金"]
-  Usage -- "キー" --> Secrets["Secrets Manager"]
-  Usage -- "集計 API" --> Langfuse
-  Usage -- "上限を読む / sub・利用者名・料金を記録" --> Limits[("DynamoDB<br/>利用上限")]
+  APIGW --> Usage
+  Usage -- "読む" --> Ledger
+  Usage -- "上限を読む / 利用者名・料金を記録" --> Limits
   Admin["管理者<br/>pnpm limits"] -- "上限の設定・手動リセット (AWS 認証情報)" --> Limits
-  App -- "⑦ OTLP/HTTP (ID トークン)" --> Collector
+  App -- "⑤ OTLP/HTTP (ID トークン)" --> Collector
   Collector -. "JWKS で検証" .-> IdP
   Collector --> Langfuse
 ```
@@ -152,24 +161,23 @@ flowchart LR
 | 通信 | 認証 | 用途 |
 | --- | --- | --- |
 | ① アプリ → Auth0 | Authorization Code + PKCE (シークレットなし) | ログイン、ID トークンとリフレッシュトークンの取得 |
-| ② アプリ → STS | ID トークン | ロールの一時認証情報 (最大 1 時間、自動更新) |
-| ③ アプリ → Bedrock | 一時認証情報 (SigV4) | モデルの呼び出し (ストリーミング) |
-| ④ アプリ → AgentCore Code Interpreter | 一時認証情報 (SigV4) | コード実行 (会話ごとのサンドボックス) |
-| ⑤ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (API Gateway の JWT オーソライザー) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
-| ⑥ アプリ → API Gateway → Lambda (VPC 内) → Langfuse | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。Langfuse のキーは Secrets Manager に置き、Lambda だけが読む。Lambda は利用上限のテーブルを読み、`sub`・利用者名・最新の料金を記録する |
-| ⑦ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
+| ② アプリ → API Gateway → LLM プロキシ (Lambda) → Bedrock / AgentCore | ID トークン (Lambda オーソライザー)。プロキシ → AWS は Lambda のロール | モデルの呼び出し (`POST /v1/chat/completions`、OpenAI 互換、SSE でストリーミング) と Code Interpreter (`POST /v1/code-interpreter/invoke`、`/stop`)。モデルの制限・利用上限・料金の記録・ログ |
+| ③ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (同上) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
+| ④ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。プロキシが書いた台帳から読む。呼ばれるたびに `sub`・利用者名・最新の料金を上限テーブルに記録する |
+| ⑤ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
 | 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`pnpm limits`)。利用者からは変えられない |
 
 番号は上の図の番号と同じです。
 
-- PC 上の stdio MCP サーバーは AWS を通りません。AWS の認証情報も渡しません。
-- 履歴を API Gateway 経由にしているのは、JWT オーソライザーが ID トークンを検証して `sub` を Lambda に渡すので、利用者を偽れないためです
-  (アプリが一時認証情報で DynamoDB を直接読み書きすると、ほかの人の項目に届かないようにするのが難しい)。
-  このため、アプリのロールに DynamoDB の権限は要りません。
-- API は ID トークンだけを受け付けます (STS・Collector と同じトークン)。JWT オーソライザーが署名 (issuer の JWKS)・`iss`・`aud` (Client ID)・期限を確かめ、
-  オーソライザーが見ない Cognito 独自の `token_use` は Lambda が確かめて、`id` 以外 (Cognito のアクセストークン) は 401 にします。
-  Auth0 のアクセストークンは `aud` が API の Identifier なので、オーソライザーの時点で弾かれます。
-- トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
+- PC 上の stdio MCP サーバーは AWS を通りません。
+- ②〜④ は 1 つの REST API にまとめ、オーソライザーも共用します。プロキシのルートだけ、API Gateway のレスポンスストリーミング (`response_transfer_mode = "STREAM"`) で
+  Lambda の応答をそのまま流します (最大 15 分、無通信 5 分まで)。HTTP API は応答をまとめて返すので使っていません。
+- オーソライザー (`app/backend/src/authorizer.ts`) は ID トークンの署名 (issuer の JWKS)・`iss`・`aud` (Client ID)・期限を確かめ、
+  Cognito の `token_use` が `id` 以外 (アクセストークン) なら断ります。Auth0 のアクセストークンは `aud` が API の Identifier なので通りません。
+  結果はトークンごとに `authorizer_cache_ttl` 秒 (既定 300) 使い回します。
+- プロキシは OpenAI 互換の Chat Completions を話すので、アプリは Rig の OpenAI 互換プロバイダーに base URL (`<CHAT_API_URL>/v1`) と ID トークンを渡すだけです。
+  プロキシの中で Bedrock の Converse / ConverseStream に変換します (ツール呼び出し、プロンプトキャッシュのトークン数も含む)。
+- トレースは今まで通りアプリから送ります。Langfuse のキーは Collector だけが持ち、PC には置きません。
 
 ## Auth0 の設定
 
@@ -184,18 +192,16 @@ flowchart LR
 - Auth0 はコールバック URL をポートまで完全一致で確かめるので、`OAUTH_REDIRECT_PORT` の固定が**必須**です (未設定だと空いているポートを使うため、Auth0 に断られます)。
   そのポートが PC で使われていると、ログインできません。ほかと重なりにくい番号を選んでください
 - リフレッシュトークンは `offline_access` スコープで受け取ります (既定のスコープに入っています)
-- ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 3 か所) は、どれもこの末尾の `/` まで合わせてください
-  - IAM の OIDC プロバイダー: 信頼ポリシーの条件キーも `<テナント>.auth0.com/:aud` と `/` 入りになります
-  - API Gateway の JWT オーソライザーの issuer (Terraform の `oidc_issuer`。IAM の OIDC プロバイダーも同じ値から作ります)
+- ID トークンの `iss` は `https://<テナント>.auth0.com/` で、**末尾に `/` が付きます**。issuer を書く所 (下の 2 か所) は、どちらもこの末尾の `/` まで合わせてください
+  - API Gateway のオーソライザーが検証する issuer (Terraform の `oidc_issuer`)
   - Collector の `issuer_url` (`infra/otel-collector.yaml`)
-- ID トークンの `aud` は Client ID です。上の 3 か所の audience / クライアント ID には Client ID を入れます
-- 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。STS のセッション名に使えない `|` は、アプリが `_` に置き換えます。
-  DynamoDB と Langfuse にはそのまま入ります
+- ID トークンの `aud` は Client ID です。上の 2 か所の audience / クライアント ID には Client ID を入れます
+- 利用者 ID の `sub` は `auth0|...` や `google-oauth2|...` の形です。DynamoDB と Langfuse にはそのまま入ります
 
 ## 開発用のログイン (Cognito)
 
 Auth0 を本番でしか使えない場合、開発環境では Amazon Cognito のユーザープールで同じ動きをさせられます。
-Cognito も OpenID Connect の ID トークンを出すので、STS、API Gateway の JWT オーソライザー、Collector はそのまま動きます。
+Cognito も OpenID Connect の ID トークンを出すので、API Gateway のオーソライザーと Collector はそのまま動きます。
 
 | 項目 | 本番 (Auth0) | 開発 (Cognito) |
 | --- | --- | --- |
@@ -215,7 +221,7 @@ Terraform で作る場合は、本番とは別の state (例: `terraform workspa
 cd infra/terraform
 terraform workspace new dev
 terraform apply -var create_cognito=true -var name=agui-rig-dev -var table_name=agui-rig-dev-chat-history
-terraform output   # oauth_issuer → OAUTH_ISSUER、oauth_client_id → OAUTH_CLIENT_ID、chat_api_url、app_role_arn
+terraform output   # oauth_issuer → OAUTH_ISSUER、oauth_client_id → OAUTH_CLIENT_ID、chat_api_url → CHAT_API_URL
 
 # 利用者は管理者が作る (自分でサインアップはできない設定)。仮パスワードは初回ログインで変更を求められる
 aws cognito-idp admin-create-user --user-pool-id "$(terraform output -raw cognito_user_pool_id)" \
@@ -232,40 +238,47 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 
 | リソース | 内容 |
 | --- | --- |
-| IAM の OIDC プロバイダー | Auth0 の issuer を登録 (audience = Client ID)。既にあれば `create_oidc_provider = false` |
-| IAM ロール (アプリ用) | 信頼: Auth0 の ID トークンだけ (`<テナント>.auth0.com/:aud` = Client ID)。権限: Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB の権限は持たない |
-| DynamoDB テーブル | チャット履歴 (`pk` = 利用者の `sub`、`sk` = 会話 ID) |
-| API Gateway (HTTP API) | JWT オーソライザー (ID トークンの署名・`iss`・`aud`・期限を検証。Cognito の `token_use` は Lambda が確認)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
+| API Gateway (REST API) | ステージ `api`。全ルート共通の Lambda オーソライザー (TOKEN 型)。`/v1/chat/completions`・`/v1/code-interpreter/invoke`・`/v1/code-interpreter/stop` (ストリーミング)、`/threads`・`/threads/{id}`・`/usage` (通常)。スロットリング付き |
+| オーソライザーの Lambda | `app/backend/src/authorizer.ts`。ID トークンを issuer の JWKS で検証し、`sub` と利用者名を各 Lambda に渡す |
+| LLM プロキシの Lambda | `app/backend/src/proxy.ts`。Bedrock の呼び出しと AgentCore Code Interpreter、台帳と上限テーブルの読み書きだけの権限。レスポンスストリーミングで呼ばれる |
 | チャット履歴の Lambda | `app/backend/src/history.ts`。DynamoDB の読み書きだけの権限 |
-| 利用料金の Lambda (任意) | `app/backend/src/usage.ts`。`langfuse_secret_arn` を指定したときだけ作る (作らなければ `/usage` は 404 で、画面にも出ない) |
-| 利用上限の DynamoDB テーブル (任意) | 利用料金と一緒に作る。`pk` = 利用者の `sub`。上限と手動リセットの時刻は管理者だけが書き、利用者名と最新の料金は Lambda が書く |
+| 利用料金の Lambda | `app/backend/src/usage.ts`。台帳を読み、上限テーブルに利用状況を書く |
+| DynamoDB テーブル (チャット履歴) | `pk` = 利用者の `sub`、`sk` = 会話 ID |
+| DynamoDB テーブル (利用料金の台帳) | `pk` = `sub`、`sk` = `M#<年月>` / `D#<年月日>`。プロキシが料金とトークン数を足す。日の項目は 100 日で TTL で消える |
+| DynamoDB テーブル (利用上限) | `pk` = `sub`。上限と手動リセットは管理者だけが書き、利用者名と最新の料金は利用料金の Lambda が書く |
+| Cognito (開発用、任意) | `create_cognito = true` のときだけ。上の「開発用のログイン」 |
+
+アプリ用の IAM ロールや IAM の OIDC プロバイダーは作りません (アプリは AWS を直接呼ばないため)。
 
 ```sh
 cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id などを入れる
-# Lambda (app/backend の TypeScript) を先にビルドする (esbuild で dist/history.mjs と dist/usage.mjs を作る)
+cp terraform.tfvars.example terraform.tfvars   # oidc_issuer、oidc_client_id、model_prices などを入れる
+# Lambda (app/backend の TypeScript) を先にビルドする (esbuild で dist/ に作る)
 (cd ../.. && pnpm install && pnpm backend:build)
 terraform init
 terraform plan
 terraform apply
-terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、app_role_arn → AWS_ROLE_ARN
+terraform output   # chat_api_url (API Gateway の URL) → CHAT_API_URL、allowed_models → BEDROCK_MODEL_ID に使えるモデル
 ```
 
+- AWS プロバイダーは 6.26 以上が要ります (REST API のレスポンスストリーミング `response_transfer_mode`)
 - state の置き場所 (S3 など) は、チームの方針に合わせて `backend` を足してください (今はローカル)
 - `oidc_issuer` は ID トークンの `iss` と**完全に一致**させてください (Auth0 は末尾に `/` が付きます)
-- 呼べるモデルは `bedrock_model_arns` で絞るのがおすすめです (未指定なら全モデル)。CloudTrail には、ロールセッション名として `chat-<email または sub>` が残ります
+- **呼べるモデルと単価は `model_prices`** で決めます (100 万トークンあたりの USD)。載っていないモデルは 400 で断ります。
+  単価はリージョンや推論プロファイルで変わるので、Bedrock の料金ページで確かめて入れてください。IAM でも絞るなら `bedrock_model_arns`
+- 1 回の出力の上限は `max_output_tokens` (既定 16384)。全利用者の同時実行を抑えるなら `proxy_reserved_concurrency`
+- プロキシが使う Code Interpreter は `code_interpreter_id` (既定は AWS マネージドの `aws.codeinterpreter.v1`)。アプリからは変えられません
 - テーブルは会話 1 件を 1 項目にし、メッセージは gzip + base64 で 1 つの属性に入れます。
   上限 (400KB) を超えそうなときは、長いツールの出力を切り詰め、それでも大きければ古いメッセージから落とします
 - 一覧は 1 人あたり新しい順に最大 200 件です
-- Lambda はオーソライザーが検証した `sub` 以外の利用者を指定できないので、他人の会話には届きません
-- API の料金はリクエスト数で決まります (HTTP API は 100 万件あたり約 1 USD)。会話 1 回で保存と一覧の読み直しが数回起きます
-- `chat_api_url` を設定しなければ、履歴は保存しません
+- 各 Lambda はオーソライザーが検証した `sub` 以外の利用者を指定できないので、他人の会話・料金・セッションには届きません
+- API の料金はリクエスト数で決まります (REST API は 100 万件あたり約 3.5〜4.25 USD。リージョンで違う)。会話 1 回で、モデル呼び出しがツールの回数 + 1 回、保存と一覧の読み直しが数回起きます
 - 全リソースに `Project`、`Environment` (`environment`、既定 `prod`)、`Owner` (`owner` を指定したとき) のタグが付きます
 
 ## 開発者ごとの AWS 開発環境
 
-開発者 1 人ずつに、自分専用のバックエンド (Cognito・IAM ロール・API Gateway・Lambda・DynamoDB) を AWS に作り、
-手元のアプリ (`tauri dev`) をそこへ向けます。模擬ではなく本物のログイン → STS → Bedrock / Code Interpreter → 履歴 API の流れを、
+開発者 1 人ずつに、自分専用のバックエンド (Cognito・API Gateway・Lambda・DynamoDB) を AWS に作り、
+手元のアプリ (`tauri dev`) をそこへ向けます。模擬ではなく本物のログイン → LLM プロキシ (Bedrock / Code Interpreter) → 履歴・利用料金の API の流れを、
 他の人の環境に影響を与えずに試せます。
 
 自分の設定はルートの `.env.cloud` に env 形式で持ちます (git には入りません)。
@@ -290,14 +303,13 @@ AWS_REGION=ap-northeast-1
 OAUTH_ISSUER=https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_XXXXXXXXX
 OAUTH_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
 OAUTH_REDIRECT_PORT=53682
-AWS_ROLE_ARN=arn:aws:iam::123456789012:role/agui-rig-dev-alice-app
-CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
+CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/api
 ```
 
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm dev-env up` | バックエンドの Lambda をビルドし、Terraform workspace `dev-<名前>` で `infra/terraform` を apply。自分のメールで Cognito の利用者を作り (仮パスワードがメールで届く)、接続先を `.env.cloud` に書き足す |
-| `pnpm dev:cloud` | `.env.cloud` の値 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`AWS_ROLE_ARN`、`CHAT_API_URL`、`AWS_REGION`、あれば `BEDROCK_MODEL_ID`) で `tauri dev` を起動。模擬向けのエンドポイントと `AWS_PROFILE` は外す |
+| `pnpm dev:cloud` | `.env.cloud` の値 (`OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`CHAT_API_URL`、あれば `BEDROCK_MODEL_ID`) で `tauri dev` を起動。アプリには `AWS_PROFILE` などの AWS の認証情報を渡さない |
 | `pnpm dev-env status` | 自分の環境の接続先を表示し、`.env.cloud` に書き直す |
 | `pnpm dev-env down` | `terraform destroy` の後、workspace と `.env.cloud` の接続先を消す |
 | `pnpm dev-env list` | この state にある開発者ごとの環境 (`dev-*` の workspace) |
@@ -306,16 +318,15 @@ CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
   `up` のときに `.env.cloud` に名前・メール・リージョンが無ければ、使った値を書いておきます
 - **名前**: `--user` > `DEV_ENV_USER` > OS のユーザ名 (英小文字・数字・ハイフン、20 文字まで)。リソース名の接頭辞は `agui-rig-dev-<名前>` です。
   メールは `--email` > `DEV_ENV_EMAIL` > `git config user.email`、リージョンは `--region` > `AWS_REGION` > `ap-northeast-1`
-- **分離**: ユーザープール・OIDC プロバイダー (issuer がプールごとに違う)・IAM ロール・API・テーブルはすべて人ごとに別で、Terraform の state も workspace で分かれます
+- **分離**: ユーザープール・API・Lambda・テーブルはすべて人ごとに別で、Terraform の state も workspace で分かれます
 - **料金**: どれも従量課金のサーバーレスなので、使っていない間はほぼかかりません (Cognito は月 1 万 MAU まで無料、
   DynamoDB はオンデマンドで PITR を切る、API Gateway と Lambda はリクエスト数)。実際にかかるのは Bedrock と Code Interpreter を呼んだ分です
-- **作らないもの**: 利用料金と利用上限 (Langfuse と VPC が要るため)。画面に料金は出ません。トレースも既定では送りません
+- **利用料金と上限**: 本番と同じく台帳と上限テーブルを作るので、画面に料金が出て、`pnpm limits` で上限も試せます。トレースは既定では送りません
 - **消し忘れ**: 全リソースに `Environment=dev`、`Owner=<名前>` のタグが付くので、
   `aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=dev` などで探せます
 - `--` の後ろは Terraform にそのまま渡ります (例: `pnpm dev-env up -- -auto-approve -var 'bedrock_model_arns=["..."]'`)
 - state は、`.env.cloud` に `DEV_ENV_STATE_BUCKET` があればチームの S3 バケットに、無ければ各自の PC
   (`infra/terraform/terraform.tfstate.d/dev-<名前>/`) に置きます。S3 なら `list` で全員の環境が見えます
-- IAM の OIDC プロバイダーはアカウントあたり 100 個までなので、開発者がそれ以上になる場合は共用の開発環境 (上の Cognito の節) を使ってください
 
 ### 開発用アカウントの準備 (管理者が一度だけ)
 
@@ -326,13 +337,13 @@ CHAT_API_URL=https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com
 | リソース | 場所 | 内容 |
 | --- | --- | --- |
 | state のバケット | 開発用アカウント | 開発者ごとの state (`agui-rig-dev/<workspace>/...`)。バージョニング、暗号化、公開ブロック、TLS 必須。古い版は 90 日で消す。ロックは S3 のロックファイル |
-| 権限の上限 (`agui-rig-dev-boundary`) | 開発用アカウント | 開発者が作る IAM ロールに必ず付ける permissions boundary。Bedrock と Code Interpreter、`agui-rig-dev-*` のテーブル、ログだけ |
+| 権限の上限 (`agui-rig-dev-boundary`) | 開発用アカウント | 開発者が作る IAM ロール (Lambda 用) に必ず付ける permissions boundary。Bedrock と Code Interpreter、`agui-rig-dev-*` のテーブル、ログだけ |
 | 権限セット (`AguiRigDeveloper`) | Identity Center | 開発者用。下の範囲だけ。`developer_group_name` のグループに、開発用アカウントで割り当てる |
 
 権限セットでできること:
 
 - `agui-rig-dev-*` の IAM ロールの作成・変更・削除。**作れるのは権限の上限を付けたロールだけ**で、上限は外せない。付けられる AWS 管理ポリシーは Lambda の実行用だけ
-- Cognito の OIDC プロバイダー、Cognito、API Gateway (HTTP API)、`agui-rig-dev-*` の Lambda と DynamoDB
+- Cognito、API Gateway (REST API)、`agui-rig-dev-*` の Lambda と DynamoDB
 - state のバケットの読み書き、`agui-rig-dev-*` の Lambda のログの閲覧、タグでの検索
 - 自分の認証での Bedrock と Code Interpreter (`pnpm dev:aws` 用。`allow_bedrock = false` で外せる)
 
@@ -395,15 +406,15 @@ pnpm dev:mock
 
 以下、コマンドはどれもリポジトリのルートで実行します (`pnpm install` は全 workspace の依存をまとめて入れます)。
 
-`dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、Auth0、AWS STS、Bedrock、
-AgentCore Code Interpreter、API Gateway (バックエンド)、OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
+`dev/mock-server.mjs` の模擬サーバー (`http://127.0.0.1:9100`) を立てて、Auth0、API Gateway (履歴・利用料金・LLM プロキシ・Code Interpreter の中継)、
+OTel Collector をすべてそこに向けた状態でアプリを開発ビルドで起動します。AWS アカウントも費用も要りません。
 
 - 「ログイン」を押すとブラウザが開き、すぐに「模擬 太郎」でログインした状態になります
-- 何か送ると、模擬の Bedrock が決まった筋書きで MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
+- 何か送ると、模擬の LLM プロキシが OpenAI 互換の SSE で、決まった筋書きの MCP の時刻ツール → Code Interpreter → 回答 の順に応答します
   (画面やツール表示の開発向け。回答の中身は意味のあるものではありません)
 - 模擬の Code Interpreter はコードを実行しません (受け取ったことだけ返します)
 - 模擬のバックエンドがチャット履歴をメモリに持つので、左の一覧から過去の会話を開けます (模擬サーバーを止めると消えます)
-- 模擬サーバーが受けたリクエスト (STS のセッション名、署名に使われた一時キー、Collector へのトレース送信と ID トークンの利用者など) はターミナルに `[mock]` で出ます
+- 模擬サーバーが受けたリクエスト (プロキシへのモデル呼び出しと利用者、Code Interpreter の中継、Collector へのトレース送信など) はターミナルに `[mock]` で出ます
 - 例の MCP サーバー (`app/desktop/examples/time-mcp`) の依存も `pnpm install` で入ります
 
 ### ログインを省略して本物の AWS で試す
@@ -413,9 +424,10 @@ aws sso login --profile my-dev      # など、ローカルの AWS 認証を用�
 AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm dev:aws
 ```
 
-Auth0 を使わず、AWS SDK 標準の認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
-AgentCore Code Interpreter を呼びます。そのプロファイルには、上の「AWS 側の準備」にあるロールと同じ権限 (Bedrock と AgentCore Code Interpreter) が必要です。
-`.env` に `AWS_PROFILE` などを書いておいても使われます。
+Auth0 もプロキシも使わず、開発者自身の AWS 認証 (`AWS_PROFILE`、SSO、環境変数のキーなど) で本物の Bedrock と
+AgentCore Code Interpreter を**直接**呼びます。そのプロファイルには Bedrock と AgentCore Code Interpreter の権限が必要です。
+`.env` に `AWS_PROFILE` などを書いておいても使われます。履歴と利用料金は使いません (ログインしないため)。
+開発ビルド専用で、リリースビルドには AWS を直接呼ぶ経路はありません。
 
 ### 自分専用の AWS 開発環境で試す
 
@@ -424,19 +436,19 @@ pnpm dev-env up      # 初回だけ。上の「開発者ごとの AWS 開発環�
 pnpm dev:cloud
 ```
 
-`pnpm dev-env up` で作った自分の環境 (Cognito でログイン → STS → Bedrock / Code Interpreter、履歴は自分の API Gateway と DynamoDB) に向けて起動します。
+`pnpm dev-env up` で作った自分の環境 (Cognito でログイン → 自分の API Gateway の LLM プロキシ・履歴・利用料金) に向けて起動します。
 
 `dev:mock`、`dev:aws`、`dev:cloud` は開発ビルド専用です。リリースビルドでは、
 
 - ログインの省略 (`DEV_SKIP_LOGIN`、`OAUTH_ISSUER` 未設定) はできず、ログイン画面に設定エラーを出します
-- `OAUTH_ISSUER` は `https://` 必須なので、模擬サーバー (`http://127.0.0.1`) には向けられません
-- `LLM_MODEL` (Anthropic API 直結) は無視し、必ず Bedrock を使います
+- `OAUTH_ISSUER` と `CHAT_API_URL` は `https://` 必須なので、模擬サーバー (`http://127.0.0.1`) には向けられません
+- モデルと Code Interpreter は必ずプロキシ経由です (`LLM_MODEL` や AWS の直接呼び出しは無視します)
 
 ### 本物の環境で動かす
 
 ```sh
 pnpm install
-cp app/desktop/.env.example app/desktop/.env            # OAuth / AWS / モデルの設定
+cp app/desktop/.env.example app/desktop/.env            # OAuth / バックエンドの URL / モデルの設定
 cp app/desktop/mcp.example.json app/desktop/mcp.json    # 使う MCP サーバー (例は examples/time-mcp)
 MCP_CONFIG=./mcp.json pnpm tauri dev                    # ./mcp.json は app/desktop からの相対
 ```
@@ -448,10 +460,10 @@ MCP_CONFIG=./mcp.json pnpm tauri dev                    # ./mcp.json は app/des
 | `OAUTH_ISSUER` / `OAUTH_CLIENT_ID` | ログインの IdP (本番は Auth0、開発は Cognito も可)。開発ビルドでは、未設定ならログインなしの開発モード。リリースビルドでは `https://` で必須 |
 | `OAUTH_REDIRECT_PORT` / `OAUTH_REDIRECT_HOST` | リダイレクトを受けるポートとホスト (`127.0.0.1` か `localhost`)。ホストは未設定なら、Cognito は `localhost`、それ以外は `127.0.0.1` |
 | `DEV_SKIP_LOGIN` | `1` でログインを省略 (開発ビルドだけ。`pnpm dev:aws` が設定する) |
-| `AWS_REGION` / `AWS_ROLE_ARN` | リージョンと、ID トークンで引き受けるロール |
-| `BEDROCK_MODEL_ID` | Bedrock のモデル (既定 `global.anthropic.claude-sonnet-5-5`) |
-| `CODE_INTERPRETER_ID` | 既定は AWS マネージドの `aws.codeinterpreter.v1`。`off` で無効 |
-| `CHAT_API_URL` | チャット履歴と利用料金の API (API Gateway の URL)。未設定なら使わない。ログインしていないとき (`dev:aws`) も使わない |
+| `CHAT_API_URL` | バックエンド (API Gateway) の URL。Terraform の出力 `chat_api_url` (`https://…/api`)。ログインして使うときは必須で、LLM プロキシ・Code Interpreter・履歴・利用料金をすべてここ経由で呼ぶ |
+| `BEDROCK_MODEL_ID` | モデル (既定 `global.anthropic.claude-sonnet-5-5`)。ログイン中はプロキシの許可リスト (Terraform の `model_prices`) に載っているもの |
+| `CODE_INTERPRETER_ID` | `off` で Code Interpreter を使わない。ログイン中はどれを使うかはプロキシ側で決まる。開発モード (`dev:aws`) では直接呼ぶ ID (既定 `aws.codeinterpreter.v1`) |
+| `AWS_REGION` | 開発モード (`dev:aws`) で直接呼ぶときのリージョン。ログイン中は使わない |
 | `MCP_CONFIG` | mcp.json の場所。未設定ならアプリの設定フォルダの `mcp.json` |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | トレースを Langfuse に送る ([トレースと利用料金](#トレースと利用料金-langfuse)) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse のキーの代わりに、任意の OTLP/HTTP 受け口 (Collector など) に送る |
@@ -468,13 +480,13 @@ LLM_MODEL=anthropic/claude-sonnet-5-5
 ANTHROPIC_API_KEY=...
 ```
 
-このとき OAuth を設定していなければ、Code Interpreter は無効になります (AWS の認証が無いため)。AWS の認証があるなら `CODE_INTERPRETER_ID=aws.codeinterpreter.v1` で有効にできます。
+開発ビルドで OAuth を設定していないときだけ使えます (ログイン中は必ずプロキシ経由)。Code Interpreter は無効になります (AWS の認証が無いため)。AWS の認証があるなら `CODE_INTERPRETER_ID=aws.codeinterpreter.v1` で有効にできます。
 
 ### 模擬サーバーと AWS のエンドポイント
 
 `pnpm dev:mock` の模擬サーバーは単体でも起動できます (`pnpm mock-server`)。
-`MOCK_MONTHLY_LIMIT_USD=1.24 pnpm dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます。
-AWS 側のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_STS` / `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます (VPC エンドポイントにも使えます)。
+`MOCK_MONTHLY_LIMIT_USD=1.24 pnpm dev:mock` のように上限を渡すと、数回のやり取りで利用上限に達する様子を試せます (模擬のプロキシも本物と同じく 429 で断ります)。
+開発モード (`dev:aws`) で直接呼ぶ AWS のエンドポイントは、AWS SDK 標準の環境変数 `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` / `AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` で差し替えられます。
 
 ### E2E テスト (模擬環境)
 
@@ -504,25 +516,28 @@ macOS には WebDriver が無いため、tauri-driver の E2E は Linux と Wind
 ### 本物の AWS への疎通確認
 
 `pnpm smoke:aws` で、アプリが使う AWS のサービスを 1 つずつ最小の呼び出しで確かめます。
-認証は AWS SDK 標準 (`AWS_PROFILE`、SSO など) で、`pnpm dev:aws` と同じです。`app/desktop/.env` と、ルートの `.env.cloud` も読みます
+Bedrock と AgentCore の直接呼び出しは AWS SDK 標準の認証 (`AWS_PROFILE`、SSO など) で、`pnpm dev:aws` と同じです。`app/desktop/.env` と、ルートの `.env.cloud` も読みます
 (`pnpm dev-env up` で自分の開発環境を作っていれば、`AWS_PROFILE` と `CHAT_API_URL` はそこから入ります)。
 
 ```sh
 AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm smoke:aws
-# API Gateway の認証付きの呼び出しまで確かめるなら、ログインで得た ID トークンを ID_TOKEN で渡す
+# API Gateway の認証付きの呼び出し (履歴・利用料金・LLM プロキシ) まで確かめるなら、ログインで得た ID トークンを ID_TOKEN で渡す
 ```
 
 | 確認 | 内容 |
 | --- | --- |
 | STS | 認証情報が有効か (GetCallerIdentity) |
-| Bedrock | `BEDROCK_MODEL_ID` のモデルを最大 16 トークンで呼ぶ (わずかに費用がかかる) |
+| Bedrock | `BEDROCK_MODEL_ID` のモデルを直接、最大 16 トークンで呼ぶ (わずかに費用がかかる) |
 | AgentCore | Code Interpreter のセッションを開始し、`print(1 + 1)` を実行して終了する (`CODE_INTERPRETER_ID=off` で省略) |
 | API Gateway | `CHAT_API_URL` があれば、トークンなしで 401 になること。`ID_TOKEN` もあれば `/threads` と `/usage` が 200 になること |
+| LLM プロキシ | `ID_TOKEN` があれば、`/v1/chat/completions` で 16 トークンだけ呼べることと、`/v1/code-interpreter/invoke` で `print(1 + 1)` が `2` を返すこと |
 
 画面まで含めて確かめるなら、Linux では `pnpm e2e:aws` で、`dev:aws` と同じ設定 (ログインなし) のアプリに
 「Code Interpreter で計算して」と送り、本物のモデルの回答を待つ E2E も動かせます (費用がかかります)。
 
 ## トレースと利用料金 (Langfuse)
+
+利用料金と利用上限の**正は LLM プロキシの台帳** (DynamoDB) です。Langfuse は、トレースと会話別・呼び出し別の内訳を見るために今まで通り使います。
 
 Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
 アプリはそれを OTLP/HTTP で Langfuse の `/api/public/otel/v1/traces` に送ります。
@@ -569,30 +584,27 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 注意:
 
 - 単価はリージョンや推論プロファイル (グローバル / リージョン) で変わることがあります。使っているものの単価を入れてください
-- Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。請求額は AWS の Cost Explorer が正です
-- 利用者 ID には ID トークンの `sub` を常に送ります (メールなどではない不透明な ID)。利用者別の集計と、画面の利用料金表示に使います
+- Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。画面の利用料金と利用上限はプロキシの台帳 (Terraform の `model_prices` の単価) で計算し、請求額は AWS の Cost Explorer が正です。
+  両方の単価を同じにしておくと、数字がそろいます
+- 利用者 ID には ID トークンの `sub` を常に送ります (メールなどではない不透明な ID)
 
 ### 画面に利用料金を出す
 
-ログイン中は、ヘッダーに「今日 $x · 今月 $y」を出します (Langfuse が計算した推定額)。
+ログイン中は、ヘッダーに「今日 $x · 今月 $y」を出します (プロキシの台帳の額)。
 
 ```
-アプリ ─(ID トークン)→ API Gateway の GET /usage ─(検証済みの sub だけ)→ Lambda (VPC 内)
-      → Langfuse の /api/public/metrics/daily?userId=<sub>  (キーは Secrets Manager)
+アプリ ─(ID トークン)→ API Gateway の GET /usage ─(検証済みの sub だけ)→ Lambda → DynamoDB (台帳と上限)
 ```
 
-- Langfuse のキーはプロジェクト全体を読めるので、PC には置かず Lambda だけが持ちます。Lambda は呼び出した本人の `sub` の金額だけを返します
-- Terraform に `langfuse_secret_arn`、`langfuse_host` (Lambda から届く Langfuse の URL)、
-  `lambda_subnet_ids`、`lambda_security_group_ids` を渡すと作られます (空なら作らず、画面にも出ません)。
-  シークレットの中身は `{"publicKey": "pk-lf-...", "secretKey": "sk-lf-..."}` です
-- Lambda のサブネットからは、EKS 上の Langfuse と Secrets Manager (VPC エンドポイントか NAT) に届く必要があります
+- 台帳は、LLM プロキシがモデル呼び出しのたびに「Bedrock が返したトークン数 × `model_prices` の単価」を月と日の項目に足したものです。
+  アプリの自己申告ではなく、Langfuse の集計を待つこともないので、遅れずに正確です
 - 「今日」「今月」の区切りは `utc_offset_minutes` (既定 540 = 日本時間) です
-- Langfuse の集計は数秒〜数十秒遅れるので、画面は実行の 5 秒後と、1 分ごとに読み直します
+- 画面は実行の 5 秒後と、1 分ごとに読み直します
 
 ### 利用者ごとの利用上限とリセット
 
-管理者が利用者ごとに月の利用上限 (USD、Langfuse の推定額) を決め、上限に達した利用者は新しいメッセージを送れなくなります。
-利用者のアプリからは上限を変えられません。
+管理者が利用者ごとに月の利用上限 (USD、台帳の額) を決め、上限に達した利用者は新しいメッセージを送れなくなります。
+上限は **LLM プロキシがサーバー側で守る**ので、利用者のアプリからは変えられず、改造したアプリでも越えられません。
 
 | 設定 | どこで | 内容 |
 | --- | --- | --- |
@@ -602,6 +614,7 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 
 ```sh
 export LIMITS_TABLE=$(terraform -chdir=infra/terraform output -raw limits_table_name)
+export USAGE_TABLE=$(terraform -chdir=infra/terraform output -raw usage_table_name)   # reset で使う
 # 管理者の AWS 認証情報 (AWS_PROFILE など) で実行する
 pnpm limits set   "auth0|abc123" 50   # この人の月の上限を $50 に (0 = 上限なし)
 pnpm limits unset "auth0|abc123"      # 既定の上限に戻す
@@ -616,17 +629,15 @@ pnpm limits list
   - 書く項目は `monthUsd`、`periodUsd`、`limitUsd`、`blocked`、`lastSeenAt`
   - 利用者名は検証済みの ID トークンの `name` (無ければ `nickname`、`cognito:username`、`email`) で、アプリから送られた値は使いません
   - `pnpm limits list` で誰がいくら使っているかを一覧できます (料金は最後にアプリを開いていた時点の値です)
-- **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。Lambda が「月初からの料金」と上限を比べるだけなので、定期実行のジョブはありません
-- **手動リセット**: `reset` で `resetAt` に今の時刻が入り、今月はその時刻からの料金で比べます。翌月になると自然に月初からに戻ります
-- **止め方**: アプリは実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます
-  - 結果は 30 秒使い回します。上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます
+- **自動リセット**: 毎月 1 日 (`utc_offset_minutes` のタイムゾーン) に自動で 0 から数え直します。台帳が月ごとの項目に分かれているので、定期実行のジョブはありません
+- **手動リセット**: `reset` で `resetAt` に今の時刻と、その時点の今月の料金 (`resetBaseUsd`) が入り、今月はそれを引いた額で比べます。翌月になると自然に月初からに戻ります
+- **止め方**:
+  - LLM プロキシが、モデルを呼ぶ前に台帳と上限を確かめ、達していれば `429` (`usage_limit_exceeded`) で断ります。**これが本当の止め所**です
+  - アプリも実行の前に `/usage` を見て、`blocked` ならモデルを呼ばずに止めます (すぐに画面で知らせるため。結果は 30 秒使い回し、上限に達しているときは毎回確かめ直すので、リセットはすぐ反映されます)
   - ヘッダーに「上限 $使用 / $上限」を出し、上限に近づくと警告、達すると赤い案内を出します
 - **限界**:
-  - `/usage` を確かめられない (Langfuse の障害など) ときは止めません
-  - Langfuse の集計は遅れるので、上限を最大で 1〜2 回の実行分ほど超えることがあります
-  - 上限の判定はアプリ (Rust) が行います。アプリは Bedrock を STS の一時認証情報で直接呼ぶので、改造したアプリなら上限を無視できます。
-    確実に止めるには Bedrock の呼び出しをサーバー側 (API Gateway + Lambda など) に寄せる必要があります
-- Lambda のサブネットから DynamoDB に届く必要があります (DynamoDB のゲートウェイ型 VPC エンドポイントか NAT)
+  - 料金は呼び出しが終わってから足すので、上限の直前に始めた 1 回の呼び出しの分 (最大 `max_output_tokens` の出力) だけ越えることがあります
+  - プロキシが DynamoDB を読めないときは、止めずに通します (ログに警告を出します)
 
 ### 本番は Collector 経由で、ID トークンで認証して送る
 
@@ -699,9 +710,9 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 | 分類 | キー |
 | --- | --- |
 | ログイン | `OAUTH_ISSUER`、`OAUTH_CLIENT_ID`、`OAUTH_SCOPES`、`OAUTH_REDIRECT_PORT`、`OAUTH_REDIRECT_HOST` |
-| AWS | `AWS_REGION`、`AWS_ROLE_ARN`、`AWS_ENDPOINT_URL_STS`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` |
+| バックエンド (LLM プロキシ・履歴・利用料金) | `CHAT_API_URL` |
 | モデルとツール | `BEDROCK_MODEL_ID`、`CODE_INTERPRETER_ID`、`MCP_CONFIG` |
-| 履歴と利用料金 | `CHAT_API_URL` |
+| 開発モードの AWS (配布物では使わない) | `AWS_REGION`、`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`、`AWS_ENDPOINT_URL_BEDROCK_AGENTCORE` |
 | トレース | `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`LANGFUSE_HOST`、`TELEMETRY_RECORD_CONTENT`、`TELEMETRY_AUTH` |
 | ログ | `RUST_LOG` |
 
@@ -733,9 +744,10 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 | --- | --- |
 | `src/lib.rs` | 起動、ログイン / ログアウト、実行環境の組み立て |
 | `src/auth.rs` | OAuth (Authorization Code + PKCE、ループバック、リフレッシュ) |
-| `src/aws.rs` | STS AssumeRoleWithWebIdentity の credential provider |
+| `src/proxy.rs` | LLM プロキシを Rig のモデルとして使う (OpenAI 互換プロバイダー + ID トークン) |
+| `src/aws.rs` | 開発モード (`dev:aws`) だけの AWS SDK の設定 |
 | `src/agent.rs` | Rig のツールループと AG-UI イベントへの変換 |
-| `src/tools/` | Code Interpreter と stdio MCP |
+| `src/tools/` | Code Interpreter (プロキシ経由 / 開発モードは直接) と stdio MCP |
 | `src/server.rs` | AG-UI エンドポイント (`POST /agent`、SSE) |
 | `src/history.rs` | チャット履歴と利用料金の API の呼び出し (`Authorization: Bearer <ID トークン>`)、実行前の利用上限の確認 |
 | `src/telemetry.rs` | ログとトレース (OpenTelemetry → Langfuse / OTLP) |
@@ -745,9 +757,9 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 
 | パス | 内容 |
 | --- | --- |
-| `app/backend/src/` | バックエンドの Lambda (TypeScript): `history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限) |
+| `app/backend/src/` | バックエンドの Lambda (TypeScript): `proxy.ts` (LLM プロキシ。`openai.ts` で OpenAI 互換 ⇔ Bedrock Converse を変換)、`authorizer.ts` (ID トークンの検証、`jwt.ts`)、`history.ts` (チャット履歴)、`usage.ts` (利用料金と利用上限)、`ledger.ts` / `pricing.ts` (台帳と単価) |
 | `app/backend/scripts/limits.ts` | 管理者用 CLI (`pnpm limits`): 利用者ごとの上限と手動リセット |
-| `infra/terraform/` | AWS のリソース (IAM の OIDC プロバイダーとロール、API Gateway、DynamoDB、Lambda) |
+| `infra/terraform/` | AWS のリソース (API Gateway の REST API、Lambda、DynamoDB、開発用の Cognito) |
 | `infra/dev-account/` | 開発用アカウントの初期設定 (開発者の権限セット、state のバケット、権限の上限)。管理者が一度だけ apply する |
 | `infra/otel-collector.yaml` | OpenTelemetry Collector の設定のリファレンス (ID トークンで受けて Langfuse へ送る)。デプロイは Langfuse のリポジトリ |
 
@@ -755,7 +767,7 @@ $env:APP_CONFIG="config/prod.json"; pnpm tauri build
 
 | パス | 内容 |
 | --- | --- |
-| `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / STS / Bedrock / AgentCore / API Gateway / Collector / Langfuse) |
+| `app/desktop/dev/mock-server.mjs` | 模擬サーバー (OAuth / API Gateway (履歴・利用料金・LLM プロキシ・Code Interpreter の中継) / Collector / Langfuse) |
 | `app/desktop/dev/run.mjs` | `pnpm dev:mock` / `pnpm dev:aws` / `pnpm dev:cloud` の起動スクリプト |
 | `app/desktop/dev/mock-env.mjs` | アプリを模擬サーバーに向ける環境変数 (`dev:mock` と E2E テストで共通) |
 | `app/desktop/dev/cloud-env.mjs` | 開発者ごとの AWS 開発環境を作る・消す (`pnpm dev-env`) |

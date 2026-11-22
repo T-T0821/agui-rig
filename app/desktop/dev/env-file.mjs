@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CLOUD_ENV_FILE = join(resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."), ".env.cloud");
 
 /** `pnpm dev-env up` が書き、`down` で消す接続先のキー。 */
-export const MANAGED_KEYS = ["OAUTH_ISSUER", "OAUTH_CLIENT_ID", "OAUTH_REDIRECT_PORT", "AWS_ROLE_ARN", "CHAT_API_URL"];
+export const MANAGED_KEYS = ["OAUTH_ISSUER", "OAUTH_CLIENT_ID", "OAUTH_REDIRECT_PORT", "CHAT_API_URL"];
 
 const LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/;
 
