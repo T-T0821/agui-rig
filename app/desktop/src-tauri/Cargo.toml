@@ -29,8 +29,6 @@ dirs = "7"
 # LLM (Rig。ログイン中はバックエンドの LLM プロキシを OpenAI 互換で呼ぶ。開発モードでは Bedrock を直接)
 rig-core = { version = "0.46", features = ["reqwest"] }
 rig-bedrock = "0.46"
-# Rig の共有 HTTP クライアント (プロキシへの要求に traceparent を付けるミドルウェアを足すため)
-rig-reqwest = "0.46"
 
 # AWS (開発モードだけ: 開発者自身の認証で Bedrock と AgentCore Code Interpreter を直接呼ぶ)
 aws-config = { version = "1", features = ["behavior-version-latest"] }

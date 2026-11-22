@@ -185,16 +185,7 @@ async fn run_loop(
             operation: "chat",
             system_instructions: system.as_deref(),
             langfuse.observation.usage_details = Empty,
-            langfuse.observation.type = Empty,
-            agui.usage_traced_by = Empty,
         );
-        // プロキシ経由では、トークン数と料金はプロキシが Langfuse の generation として載せる (このスパンの子になる)。
-        // ここでも載せると二重に数えるので、このスパンはただの span にして、トークン数は送る前に外す (telemetry.rs)
-        let proxy_usage = runtime.model.usage_traced_by_proxy();
-        if proxy_usage {
-            generation.record("langfuse.observation.type", "span");
-            generation.record(telemetry::USAGE_TRACED_BY, "proxy");
-        }
         telemetry_content::record_model_input(&generation, &history, content);
 
         let mut stream = generation.in_scope(|| runtime.model.get().stream(request).map_err(|e| e.to_string()))?;
@@ -205,8 +196,7 @@ async fn run_loop(
         let mut tool_ids = HashMap::new();
         let mut answer = String::new();
 
-        // 要求はストリームを最初に読んだときに送られる。そのときのスパンが traceparent になるので、読む間もこのスパンに入る
-        while let Some(item) = stream.next().instrument(generation.clone()).await {
+        while let Some(item) = stream.next().await {
             let Item::Event(event) = item.map_err(|e| e.to_string())? else { continue };
             match event {
                 StreamEvent::Start { part, kind: PartKind::ToolCall, name } => {
@@ -243,9 +233,7 @@ async fn run_loop(
 
         let response = stream.finish().instrument(generation.clone()).await.map_err(|e| e.to_string())?;
         telemetry_content::record_model_output(&generation, &response.choice, content);
-        if !proxy_usage {
-            generation.record("langfuse.observation.usage_details", usage_details(&response.usage).as_str());
-        }
+        generation.record("langfuse.observation.usage_details", usage_details(&response.usage).as_str());
         drop(generation);
         let calls: Vec<_> = response
             .choice

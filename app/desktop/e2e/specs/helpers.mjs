@@ -10,13 +10,6 @@ export async function setMock(config) {
   if (!r.ok) throw new Error(`模擬サーバーの設定に失敗: ${r.status}`);
 }
 
-/** 模擬サーバーが記録したトレース (プロキシの traceparent、Collector が受けたもの)。 */
-export async function mockTraces() {
-  const r = await fetch(`http://127.0.0.1:${port}/__mock/traces`);
-  if (!r.ok) throw new Error(`模擬サーバーのトレースを読めません: ${r.status}`);
-  return r.json();
-}
-
 /** 画面のスクリーンショットを e2e/artifacts/ に連番で残す。 */
 export async function screenshot(name) {
   shot += 1;

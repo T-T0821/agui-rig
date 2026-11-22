@@ -191,9 +191,8 @@ export class StreamTranslator {
   readonly id: string;
   readonly created = Math.floor(Date.now() / 1000);
   private toolIndex = new Map<number, number>();
-  /** 回答のテキストとツール呼び出し (トレース用) */
+  /** 回答のテキスト (トレース用) */
   text = "";
-  toolCalls: { id?: string; name?: string; arguments: string }[] = [];
   stopReason: string | undefined;
   usage: TokenUsage | undefined;
 
@@ -214,7 +213,6 @@ export class StreamTranslator {
       const { toolUseId, name } = event.contentBlockStart.start.toolUse;
       const index = this.toolIndex.size;
       this.toolIndex.set(event.contentBlockStart.contentBlockIndex ?? 0, index);
-      this.toolCalls.push({ id: toolUseId, name, arguments: "" });
       return [this.chunk({ tool_calls: [{ index, id: toolUseId, type: "function", function: { name, arguments: "" } }] })];
     }
     if (event.contentBlockDelta?.delta) {
@@ -225,7 +223,6 @@ export class StreamTranslator {
       }
       if (delta.toolUse?.input) {
         const index = this.toolIndex.get(contentBlockIndex ?? 0) ?? 0;
-        if (this.toolCalls[index]) this.toolCalls[index].arguments += delta.toolUse.input;
         return [this.chunk({ tool_calls: [{ index, function: { arguments: delta.toolUse.input } }] })];
       }
       // 推論 (reasoningContent) は返さない (Rig が次の要求に入れ直すと、Bedrock は署名なしの推論を受け付けないため)

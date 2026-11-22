@@ -15,9 +15,6 @@
 //!
 //! プロンプトや回答の本文は、`TELEMETRY_RECORD_CONTENT=true` のときだけ記録する。
 //! 利用者 ID (ID トークンの sub) は、利用料金の集計に使うので常に記録する。
-//!
-//! LLM プロキシ経由のモデル呼び出しでは、トークン数と料金はプロキシが Langfuse の generation として送る
-//! (このアプリのスパンの子になる)。二重に数えないよう、アプリ側のスパンからは送る前にトークン数を外す ([`UsageStripper`])。
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -30,8 +27,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::error::OTelSdkResult;
-use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter as SpanExport};
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -63,37 +59,6 @@ impl HttpClient for IdTokenClient {
         };
         request.headers_mut().insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
         self.0.send_bytes(request).await
-    }
-}
-
-/// このフィールドが `proxy` のスパンは、トークン数をプロキシ側のスパンが持つ (アプリ側では送らない)。
-pub const USAGE_TRACED_BY: &str = "agui.usage_traced_by";
-
-/// 送る前に、プロキシがトークン数を載せるスパンから `gen_ai.usage.*` を外す。
-/// Rig はモデル呼び出しのスパンに必ずトークン数を書くので、スパンの側では止められない。
-#[derive(Debug)]
-struct UsageStripper<E>(E);
-
-fn strip_proxy_usage(span: &mut SpanData) {
-    let by_proxy = span.attributes.iter().any(|kv| kv.key.as_str() == USAGE_TRACED_BY && kv.value.as_str() == "proxy");
-    if by_proxy {
-        span.attributes.retain(|kv| !kv.key.as_str().starts_with("gen_ai.usage.") && kv.key.as_str() != "langfuse.observation.usage_details");
-    }
-}
-
-impl<E: SpanExport> SpanExport for UsageStripper<E> {
-    fn export(&self, mut batch: Vec<SpanData>) -> impl std::future::Future<Output = OTelSdkResult> + Send {
-        batch.iter_mut().for_each(strip_proxy_usage);
-        self.0.export(batch)
-    }
-    fn shutdown_with_timeout(&self, timeout: std::time::Duration) -> OTelSdkResult {
-        self.0.shutdown_with_timeout(timeout)
-    }
-    fn force_flush(&self) -> OTelSdkResult {
-        self.0.force_flush()
-    }
-    fn set_resource(&mut self, resource: &Resource) {
-        self.0.set_resource(resource)
     }
 }
 
@@ -163,7 +128,7 @@ pub fn init() {
     let (otel, note) = match exporter() {
         Ok(Some((exporter, target))) => {
             let provider = SdkTracerProvider::builder()
-                .with_batch_exporter(UsageStripper(exporter))
+                .with_batch_exporter(exporter)
                 .with_resource(
                     Resource::builder()
                         .with_service_name("rig-agui-chat")
@@ -196,44 +161,5 @@ pub fn shutdown() {
         && let Err(e) = provider.shutdown()
     {
         eprintln!("[telemetry] 送信しきれなかったトレースがあります: {e}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use opentelemetry::trace::{SpanContext, SpanKind, Status};
-    use std::time::SystemTime;
-
-    fn span(attrs: Vec<KeyValue>) -> SpanData {
-        SpanData {
-            span_context: SpanContext::empty_context(),
-            parent_span_id: opentelemetry::trace::SpanId::INVALID,
-            parent_span_is_remote: false,
-            span_kind: SpanKind::Internal,
-            name: "chat".into(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            attributes: attrs,
-            dropped_attributes_count: 0,
-            events: Default::default(),
-            links: Default::default(),
-            status: Status::Unset,
-            instrumentation_scope: Default::default(),
-        }
-    }
-
-    #[test]
-    fn strips_usage_only_when_proxy_traces_it() {
-        let usage = || vec![KeyValue::new("gen_ai.usage.input_tokens", 10), KeyValue::new("gen_ai.request.model", "m")];
-
-        let mut s = span([usage(), vec![KeyValue::new(USAGE_TRACED_BY, "proxy")]].concat());
-        strip_proxy_usage(&mut s);
-        let keys: Vec<_> = s.attributes.iter().map(|kv| kv.key.as_str().to_string()).collect();
-        assert_eq!(keys, ["gen_ai.request.model", USAGE_TRACED_BY]);
-
-        let mut s = span(usage());
-        strip_proxy_usage(&mut s);
-        assert_eq!(s.attributes.len(), 2);
     }
 }

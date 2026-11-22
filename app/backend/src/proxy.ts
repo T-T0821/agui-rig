@@ -10,8 +10,6 @@
 //   - 出力トークンの上限: MAX_OUTPUT_TOKENS
 //   - 利用上限: 呼ぶ前に台帳 (ledger.ts) で確かめ、達していれば 429。呼んだ後に Bedrock が返したトークン数から料金を足す
 //   - ログ: 呼び出しごとに利用者・モデル・トークン数・料金・所要時間を 1 行の JSON で CloudWatch Logs に出す (本文は出さない)
-//   - トレース: OTLP_TRACES_ENDPOINT があれば、呼び出しごとに Langfuse の generation (トークン数・料金) を
-//     OTel Collector に送る。アプリの traceparent を親にするので、アプリのトレースの中に並ぶ (trace.ts)
 // アプリが改造されていても、これらは迂回できない。
 //
 // API Gateway のストリーミングでは、関数は awslambda.HttpResponseStream.from で「メタデータ (状態コードとヘッダー) +
@@ -33,17 +31,12 @@ import { type Event, subOf } from "./http.ts";
 import { addUsage, usageOf } from "./ledger.ts";
 import { BadRequest, type ChatRequest, StreamTranslator, completionOf, toConverse } from "./openai.ts";
 import { type TokenUsage, costOf, parsePriceTable } from "./pricing.ts";
-import { headerOf, sendGeneration } from "./trace.ts";
 
 const bedrock = new BedrockRuntimeClient({});
 const agentcore = new BedrockAgentCoreClient({});
 const prices = parsePriceTable(process.env.MODEL_PRICES);
 const maxOutputTokens = Number(process.env.MAX_OUTPUT_TOKENS ?? 16384);
 const codeInterpreterId = process.env.CODE_INTERPRETER_ID ?? "aws.codeinterpreter.v1";
-/** モデル呼び出しを Langfuse に送る Collector の受け口 (`https://<Collector>/v1/traces`)。空なら送らない */
-const tracesEndpoint = process.env.OTLP_TRACES_ENDPOINT || undefined;
-/** トレースにプロンプトと回答の本文を入れるか */
-const traceContent = ["1", "true", "yes"].includes(process.env.PROXY_TRACE_CONTENT ?? "");
 /** 1 リクエストの本文の上限 (会話全体を毎回送るので、余裕を持たせる) */
 const MAX_BODY_BYTES = 6 * 1024 * 1024;
 
@@ -85,62 +78,17 @@ function blockedMessage(limitUsd: number | null): string {
   return `今月の利用上限${limit}に達したため、新しいメッセージを送れません。上限は毎月 1 日に自動でリセットされます。急ぎの場合は管理者に上限の変更かリセットを依頼してください。`;
 }
 
-/** 1 回のモデル呼び出しの結果 (台帳・ログ・トレースに使う) */
-type Outcome = {
-  usage: TokenUsage | undefined;
-  stream: boolean;
-  stopReason?: string;
-  firstTokenMs?: number;
-  error?: string;
-  /** 回答 (トレースの本文用。PROXY_TRACE_CONTENT=true のときだけ送る) */
-  output: unknown;
-};
-
-/**
- * 料金を台帳に足してログに出し、Collector (Langfuse) に generation を送る。
- * 応答はもう返しているので、どれが失敗してもログだけ残す。
- */
-async function settle(event: Event, sub: string, req: ChatRequest, started: number, o: Outcome): Promise<void> {
-  const model = req.model as string;
-  const u = o.usage ?? { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+/** 料金を台帳に足してログに出す。失敗しても応答はもう返しているので、ログだけ残す */
+async function settle(sub: string, model: string, usage: TokenUsage | undefined, fields: Record<string, unknown>): Promise<void> {
+  const u = usage ?? { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
   const cost = costOf(prices[model], u);
-  const ended = Date.now();
-  const fields: Record<string, unknown> = {};
-  const [ledger, trace] = await Promise.allSettled([
-    addUsage(sub, model, u, cost.total),
-    sendGeneration(tracesEndpoint, headerOf(event.headers, "authorization"), {
-      sub,
-      model,
-      traceparent: headerOf(event.headers, "traceparent"),
-      startMs: started,
-      endMs: ended,
-      firstTokenMs: o.firstTokenMs,
-      usage: u,
-      cost,
-      stream: o.stream,
-      stopReason: o.stopReason,
-      error: o.error,
-      ...(traceContent ? { content: { input: req.messages, output: o.output } } : {}),
-    }),
-  ]);
-  if (ledger.status === "rejected") {
-    console.error("利用料金を台帳に記録できません", ledger.reason);
-    fields.ledgerError = String(ledger.reason);
+  try {
+    await addUsage(sub, model, u, cost.total);
+  } catch (e) {
+    console.error("利用料金を台帳に記録できません", e);
+    fields.ledgerError = String(e);
   }
-  if (trace.status === "fulfilled" && trace.value) fields.traceError = trace.value;
-  log({
-    event: "chat_completion",
-    sub,
-    model,
-    ...u,
-    costUsd: cost.total,
-    stream: o.stream,
-    stopReason: o.stopReason,
-    latencyMs: ended - started,
-    firstTokenMs: o.firstTokenMs,
-    ...(o.error ? { error: o.error } : {}),
-    ...fields,
-  });
+  log({ event: "chat_completion", sub, model, ...u, costUsd: cost.total, ...fields });
 }
 
 async function chatCompletions(event: Event, stream: Writable, sub: string): Promise<void> {
@@ -168,7 +116,7 @@ async function chatCompletions(event: Event, stream: Writable, sub: string): Pro
     const out = await bedrock.send(new ConverseCommand({ modelId: model, ...input }));
     const { body, usage } = completionOf(model, out);
     sendJson(stream, 200, body);
-    return settle(event, sub, req, started, { usage, stream: false, stopReason: out.stopReason, output: body.choices[0].message });
+    return settle(sub, model, usage, { stream: false, stopReason: out.stopReason, latencyMs: Date.now() - started });
   }
 
   const out = await bedrock.send(new ConverseStreamCommand({ modelId: model, ...input }));
@@ -190,13 +138,12 @@ async function chatCompletions(event: Event, stream: Writable, sub: string): Pro
   }
   sse.write("data: [DONE]\n\n");
   sse.end();
-  await settle(event, sub, req, started, {
-    usage: t.usage,
+  await settle(sub, model, t.usage, {
     stream: true,
     stopReason: t.stopReason,
+    latencyMs: Date.now() - started,
     firstTokenMs,
-    error: streamError,
-    output: { role: "assistant", content: t.text || null, ...(t.toolCalls.length ? { tool_calls: t.toolCalls } : {}) },
+    ...(streamError ? { error: streamError } : {}),
   });
 }
 

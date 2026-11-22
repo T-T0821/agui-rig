@@ -108,23 +108,6 @@ variable "code_interpreter_id" {
   default     = "aws.codeinterpreter.v1"
 }
 
-variable "proxy_otlp_traces_endpoint" {
-  description = "プロキシがモデル呼び出し (トークン数・料金) を Langfuse に送る OTel Collector の受け口 (https://<Collector>/v1/traces)。アプリと同じ Collector を指す。空なら送らない"
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = var.proxy_otlp_traces_endpoint == "" || startswith(var.proxy_otlp_traces_endpoint, "https://")
-    error_message = "利用者の ID トークンを付けて送るので、https:// にしてください。"
-  }
-}
-
-variable "proxy_trace_content" {
-  description = "プロキシのトレースにプロンプトと回答の本文を入れるか (アプリの TELEMETRY_RECORD_CONTENT と揃える)"
-  type        = bool
-  default     = false
-}
-
 variable "code_interpreter_arns" {
   description = "プロキシの Lambda が使ってよい Code Interpreter の ARN。空なら全部 (*)"
   type        = list(string)

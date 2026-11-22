@@ -6,7 +6,6 @@ import { stageWildcard } from "../src/authorizer.ts";
 import { bearerToken, userNameOfClaims, verifyIdToken } from "../src/jwt.ts";
 import { BadRequest, StreamTranslator, completionOf, finishReason, openAiUsage, toConverse } from "../src/openai.ts";
 import { costOf, parsePriceTable } from "../src/pricing.ts";
-import { headerOf, otlpBody, parseTraceparent, sendGeneration } from "../src/trace.ts";
 
 // ---- OpenAI → Converse ----
 
@@ -192,110 +191,4 @@ test("Code Interpreter のセッション名は利用者ごと (sub は名前に
   assert.match(sessionName("auth0|1", "3f2b-aa_bb"), /^u[0-9a-f]{24}t3f2baabb$/);
   assert.notEqual(ownerPrefix("auth0|1"), ownerPrefix("auth0|2"));
   assert.ok(!sessionName("auth0|1", "x").includes("auth0"));
-});
-
-// ---- トレース (Langfuse の generation) ----
-
-test("traceparent を読む (形が違うもの・ID がすべて 0 のものは使わない)", () => {
-  assert.deepEqual(parseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"), {
-    traceId: "0af7651916cd43dd8448eb211c80319c",
-    spanId: "b7ad6b7169203331",
-    sampled: true,
-  });
-  assert.equal(parseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00")?.sampled, false);
-  assert.equal(parseTraceparent(undefined), undefined);
-  assert.equal(parseTraceparent("00-00000000000000000000000000000000-b7ad6b7169203331-01"), undefined);
-  assert.equal(parseTraceparent("garbage"), undefined);
-});
-
-const generation = {
-  sub: "auth0|u1",
-  model: "m",
-  traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-  startMs: 1_700_000_000_000,
-  endMs: 1_700_000_001_500,
-  firstTokenMs: 300,
-  usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 700, cacheWriteInputTokens: 0 },
-  cost: costOf({ input: 3, output: 15, cache_read: 0.3 }, { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 700, cacheWriteInputTokens: 0 }),
-  stream: true,
-  stopReason: "end_turn",
-};
-
-function attrsOf(body: ReturnType<typeof otlpBody>): Record<string, unknown> {
-  const span = body.resourceSpans[0].scopeSpans[0].spans[0];
-  return Object.fromEntries(span.attributes.map((a) => [a.key, Object.values(a.value)[0]]));
-}
-
-test("generation のスパンをアプリのトレースの子にし、トークン数と台帳の料金を載せる", () => {
-  const body = otlpBody(generation, { traceId: "f".repeat(32), spanId: "e".repeat(16) });
-  const span = body.resourceSpans[0].scopeSpans[0].spans[0];
-  assert.equal(span.traceId, "0af7651916cd43dd8448eb211c80319c");
-  assert.equal(span.parentSpanId, "b7ad6b7169203331");
-  assert.equal(span.spanId, "e".repeat(16));
-  assert.equal(span.startTimeUnixNano, "1700000000000000000");
-  assert.equal(span.endTimeUnixNano, "1700000001500000000");
-  const a = attrsOf(body);
-  assert.equal(a["langfuse.observation.type"], "generation");
-  assert.equal(a["langfuse.user.id"], "auth0|u1");
-  assert.deepEqual(JSON.parse(a["langfuse.observation.usage_details"] as string), {
-    input: 100,
-    output: 20,
-    cache_read_input_tokens: 700,
-    cache_creation_input_tokens: 0,
-  });
-  const cost = JSON.parse(a["langfuse.observation.cost_details"] as string);
-  assert.ok(Math.abs(cost.total - (100 * 3 + 20 * 15 + 700 * 0.3) / 1e6) < 1e-12);
-  assert.equal(a["langfuse.observation.completion_start_time"], new Date(1_700_000_000_300).toISOString());
-  assert.equal(a["langfuse.trace.name"], undefined);
-  // 本文は渡されたときだけ
-  assert.equal(a["langfuse.observation.input"], undefined);
-});
-
-test("traceparent が無ければ、このスパンだけのトレースにする。エラーは ERROR にする", () => {
-  const body = otlpBody({ ...generation, traceparent: undefined, error: "boom", content: { input: [{ role: "user", content: "hi" }], output: { content: "yo" } } }, {
-    traceId: "f".repeat(32),
-    spanId: "e".repeat(16),
-  });
-  const span = body.resourceSpans[0].scopeSpans[0].spans[0];
-  assert.equal(span.traceId, "f".repeat(32));
-  assert.equal("parentSpanId" in span, false);
-  assert.deepEqual(span.status, { code: 2, message: "boom" });
-  const a = attrsOf(body);
-  assert.equal(a["langfuse.trace.name"], "llm-proxy");
-  assert.equal(a["langfuse.observation.level"], "ERROR");
-  assert.equal(a["langfuse.observation.input"], '[{"role":"user","content":"hi"}]');
-});
-
-test("Collector に ID トークンを付けて送る。未設定・サンプリング外なら送らない。失敗は理由を返す", async () => {
-  const calls: { url: string; init: RequestInit }[] = [];
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string, init: RequestInit) => {
-    calls.push({ url, init });
-    return new Response("", { status: calls.length === 1 ? 200 : 401 });
-  }) as typeof fetch;
-  try {
-    assert.equal(await sendGeneration(undefined, "Bearer t", generation), undefined);
-    assert.equal(await sendGeneration("https://c/v1/traces", "Bearer t", { ...generation, traceparent: generation.traceparent.replace(/01$/, "00") }), undefined);
-    assert.equal(calls.length, 0);
-    assert.equal(await sendGeneration("https://c/v1/traces", "Bearer t", generation), undefined);
-    assert.equal(calls[0].url, "https://c/v1/traces");
-    assert.equal((calls[0].init.headers as Record<string, string>).authorization, "Bearer t");
-    assert.equal(await sendGeneration("https://c/v1/traces", "Bearer t", generation), "Collector が 401 を返しました");
-    assert.match((await sendGeneration("https://c/v1/traces", undefined, generation)) ?? "", /Authorization/);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("ヘッダーは大文字小文字を区別せずに探す", () => {
-  assert.equal(headerOf({ Authorization: "Bearer a", TraceParent: "x" }, "traceparent"), "x");
-  assert.equal(headerOf(null, "authorization"), undefined);
-});
-
-test("ストリームのツール呼び出しをトレース用に組み立てる", () => {
-  const t = new StreamTranslator("m");
-  t.next({ contentBlockStart: { contentBlockIndex: 1, start: { toolUse: { toolUseId: "c1", name: "time__now" } } } } as never);
-  t.next({ contentBlockDelta: { contentBlockIndex: 1, delta: { toolUse: { input: '{"tz":' } } } } as never);
-  t.next({ contentBlockDelta: { contentBlockIndex: 1, delta: { toolUse: { input: '"UTC"}' } } } } as never);
-  assert.deepEqual(t.toolCalls, [{ id: "c1", name: "time__now", arguments: '{"tz":"UTC"}' }]);
 });
