@@ -20,6 +20,10 @@ oidc_client_id = "your-client-id"
 # }
 # max_output_tokens = 16384
 
+# プロキシのモデル呼び出し (トークン数・料金) を Langfuse に送る。アプリと同じ OTel Collector の受け口を指す
+# proxy_otlp_traces_endpoint = "https://otel.example.com/v1/traces"
+# proxy_trace_content        = false # プロンプトと回答の本文も送るか
+
 # プロキシの Lambda が呼べるモデルを IAM でも絞る (おすすめ)
 # bedrock_model_arns = [
 #   "arn:aws:bedrock:ap-northeast-1:123456789012:inference-profile/global.anthropic.claude-sonnet-5-5",

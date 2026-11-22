@@ -4223,6 +4223,7 @@ dependencies = [
  "reqwest",
  "rig-bedrock",
  "rig-core",
+ "rig-reqwest",
  "rmcp",
  "serde",
  "serde_json",

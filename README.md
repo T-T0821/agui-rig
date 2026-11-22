@@ -104,7 +104,8 @@ PC には AWS の認証情報も Langfuse のキーも置きません。画面 (
 - **最小権限**: Bedrock と AgentCore の権限はプロキシの Lambda のロールだけが持つ。履歴・利用料金の Lambda はそれぞれのテーブルだけ
 - **利用者の分離**: 全ルートで同じ Lambda オーソライザーが ID トークンを検証し、検証済みの `sub` だけで履歴・料金・Code Interpreter のセッションを分ける
 - **監査とコスト**: 呼び出しごとに利用者・モデル・トークン数・料金・所要時間をプロキシが CloudWatch Logs に 1 行の JSON で出す (本文は出さない)。請求額の正は Cost Explorer、会話別の内訳は Langfuse
-- **可観測性**: トレースは今まで通り、アプリから ID トークンを検証する OTel Collector 経由でセルフホストの Langfuse に送る (EKS 上の Langfuse と Collector のデプロイは別リポジトリで管理)
+- **可観測性**: ID トークンを検証する OTel Collector 経由で、セルフホストの Langfuse に送る (EKS 上の Langfuse と Collector のデプロイは別リポジトリで管理)。
+  モデル呼び出し (トークン数・料金) は LLM プロキシが送り、チャットとツール呼び出しはアプリが送る。`traceparent` で 1 本のトレースにつながる
 - **IaC**: AWS のリソースは `infra/terraform/` の Terraform で作る (下の「AWS 側の準備」)
 
 <details>
@@ -145,6 +146,7 @@ flowchart LR
   Proxy --> Bedrock
   Proxy --> CI
   Proxy --> Logs
+  Proxy -- "⑥ generation (利用者の ID トークン)" --> Collector
   APIGW --> History
   History -- "sub ごとに読み書き" --> DDB
   APIGW --> Usage
@@ -164,7 +166,8 @@ flowchart LR
 | ② アプリ → API Gateway → LLM プロキシ (Lambda) → Bedrock / AgentCore | ID トークン (Lambda オーソライザー)。プロキシ → AWS は Lambda のロール | モデルの呼び出し (`POST /v1/chat/completions`、OpenAI 互換、SSE でストリーミング) と Code Interpreter (`POST /v1/code-interpreter/invoke`、`/stop`)。モデルの制限・利用上限・料金の記録・ログ |
 | ③ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (同上) | チャット履歴 (`/threads`)。Lambda が ID トークンの `sub` だけで利用者を分ける |
 | ④ アプリ → API Gateway → Lambda → DynamoDB | ID トークン (同上) | 自分の利用料金 (`/usage`、今日・今月) と利用上限の状態。プロキシが書いた台帳から読む。呼ばれるたびに `sub`・利用者名・最新の料金を上限テーブルに記録する |
-| ⑤ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | トレース、トークン数、料金の内訳。利用者 ID は Collector が検証済みの `sub` で上書きする |
+| ⑤ アプリ → OTel Collector → Langfuse | ID トークン (Collector の oidc 認証)。Collector → Langfuse は Langfuse のキー | チャットとツール呼び出しのトレース。利用者 ID は Collector が検証済みの `sub` で上書きする |
+| ⑥ LLM プロキシ → OTel Collector → Langfuse | アプリから届いた同じ利用者の ID トークン (Collector の oidc 認証) | モデル呼び出しごとの generation (トークン数・台帳と同じ単価の料金)。アプリの `traceparent` を親にして、⑤ のトレースの中に入る |
 | 管理者 → DynamoDB (利用上限) | 管理者の AWS 認証情報 | 利用者ごとの月の上限と手動リセット (`pnpm limits`)。利用者からは変えられない |
 
 番号は上の図の番号と同じです。
@@ -177,7 +180,7 @@ flowchart LR
   結果はトークンごとに `authorizer_cache_ttl` 秒 (既定 300) 使い回します。
 - プロキシは OpenAI 互換の Chat Completions を話すので、アプリは Rig の OpenAI 互換プロバイダーに base URL (`<CHAT_API_URL>/v1`) と ID トークンを渡すだけです。
   プロキシの中で Bedrock の Converse / ConverseStream に変換します (ツール呼び出し、プロンプトキャッシュのトークン数も含む)。
-- トレースは今まで通りアプリから送ります。Langfuse のキーは Collector だけが持ち、PC には置きません。
+- トレースは、チャットとツール呼び出しをアプリが、モデル呼び出しをプロキシが送ります。Langfuse のキーは Collector だけが持ち、PC にもプロキシにも置きません。
 
 ## Auth0 の設定
 
@@ -539,24 +542,49 @@ AWS_PROFILE=my-dev AWS_REGION=ap-northeast-1 pnpm smoke:aws
 
 利用料金と利用上限の**正は LLM プロキシの台帳** (DynamoDB) です。Langfuse は、トレースと会話別・呼び出し別の内訳を見るために今まで通り使います。
 
-Rig はモデル呼び出しごとに OpenTelemetry の GenAI 規約に沿ったスパン (モデル名、トークン数など) を出します。
-アプリはそれを OTLP/HTTP で Langfuse の `/api/public/otel/v1/traces` に送ります。
+トレースは 2 か所から送り、W3C の `traceparent` で 1 本につなげます。
+
+```
+アプリ ─(チャット・ツール呼び出しのスパン)──────────────→ Collector → Langfuse
+  └─ プロキシへの要求に traceparent ─→ LLM プロキシ ─(generation)─┘
+```
+
+- **アプリ**: チャット 1 回のスパンと、ツール呼び出しのスパンを送ります。プロキシへの要求には、そのときのモデル呼び出しのスパンの
+  `traceparent` を付けます (`app/desktop/src-tauri/src/proxy.rs`。トレースを送っていないときは付きません)
+- **LLM プロキシ**: 応答を返し終えてから、モデル呼び出しを Langfuse の generation として Collector に送ります (`app/backend/src/trace.ts`)。
+  トークン数は Bedrock が返した値、料金は台帳と同じ `model_prices` の単価で計算した値です。アプリを改造しても変えられません。
+  送れなくてもチャットは止めません (CloudWatch Logs の呼び出しログに `traceError` が出ます)
+- **二重計上しない**: プロキシ経由のとき、アプリ側のモデル呼び出しのスパンは Generation ではなくただの span にし、トークン数は送る前に外します
+  (`telemetry.rs` の `UsageStripper`)。トークン数と料金はプロキシの generation にだけ載ります
 
 Langfuse での見え方:
 
 - チャット 1 回 = トレース 1 本。名前は `chat`、セッション = AG-UI のスレッド ID
-- その下に、モデル呼び出し (`chat`、Generation として表示) とツール呼び出し (`execute_tool <ツール名>`) が順に並ぶ
-- 失敗した実行とツールは ERROR レベルになる
+- その下に、モデル呼び出し (`chat`) とツール呼び出し (`execute_tool <ツール名>`) が順に並ぶ。モデル呼び出しの中に、
+  プロキシの generation (`chat <モデル ID>`、トークン数と料金付き) が入る
+- アプリがトレースを送っていない (または `traceparent` が無い) ときは、プロキシの generation だけが `llm-proxy` という名前のトレースになる
+- 失敗した実行・ツール・モデル呼び出しは ERROR レベルになる
 
-本文 (プロンプト、回答、ツールの入出力) は `TELEMETRY_RECORD_CONTENT=true` のときだけ送ります。
+プロキシ側の設定は Terraform の変数です (アプリの設定は今まで通り)。
+
+| 変数 | 中身 |
+| --- | --- |
+| `proxy_otlp_traces_endpoint` | Collector の受け口 `https://<Collector>/v1/traces` (アプリと同じ Collector。Lambda から届く公開の受け口)。空なら送らない |
+| `proxy_trace_content` | プロンプトと回答の本文も送るか (既定 `false`)。アプリの `TELEMETRY_RECORD_CONTENT` と揃える |
+
+プロキシは、アプリから届いた ID トークンをそのまま Collector への認証に使います。Collector の設定 (oidc 認証と、利用者 ID を `sub` で上書きする処理) は
+アプリと共通なので、プロキシのために Langfuse のキーや新しい秘密を用意する必要はありません。
+
+本文 (プロンプト、回答、ツールの入出力) は `TELEMETRY_RECORD_CONTENT=true` (プロキシは `proxy_trace_content = true`) のときだけ送ります。
 利用者 ID には ID トークンの `sub` (不透明な ID) を常に送ります。AWS の認証情報は送りません。
 ID トークンは、`TELEMETRY_AUTH=id_token` のときに Collector への認証ヘッダーとしてだけ使います (トレースの中身には入れません)。
 
 ### 料金の計測
 
-モデル呼び出しのスパンには、トークン数を重ならない 4 つの区分に分けて載せています
-(`langfuse.observation.usage_details`)。Langfuse はこれにモデル定義の単価を掛けて、
-呼び出し・トレース・利用者・セッションごとの料金を出します。
+プロキシの generation には、トークン数を重ならない 4 つの区分に分けて (`langfuse.observation.usage_details`)、
+料金をその区分ごとと合計で (`langfuse.observation.cost_details`、台帳と同じ単価) 載せています。
+Langfuse はこの料金をそのまま使い、呼び出し・トレース・利用者・セッションごとに集計します。
+そのため、プロキシ経由 (本番) では Langfuse のモデル定義は要らず、Langfuse の料金と画面の利用料金 (台帳) がそろいます。
 
 | キー | 中身 |
 | --- | --- |
@@ -565,8 +593,9 @@ ID トークンは、`TELEMETRY_AUTH=id_token` のときに Collector への認�
 | `cache_read_input_tokens` | キャッシュから読んだ入力トークン |
 | `cache_creation_input_tokens` | キャッシュに書いた入力トークン |
 
-Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfuse 組み込みの単価表に
-一致しないことがあるので、使うモデルごとにモデル定義を 1 件追加します。
+開発モード (ログインせずに Bedrock を直接呼ぶ) では、アプリが同じ 4 つのキーでトークン数だけを送ります。
+このときは Langfuse がモデル定義の単価を掛けるので、料金も見たい場合は使うモデルごとにモデル定義を 1 件追加します
+(Bedrock のモデル ID は Langfuse 組み込みの単価表に一致しないことがあるため)。
 
 1. Langfuse の **Project Settings → Models** で **Add model definition** を押す
    (トレース画面の Generation に出ているモデル名のバッジからも作れます)
@@ -584,8 +613,8 @@ Bedrock のモデル ID (`global.anthropic.claude-sonnet-5-5` など) は Langfu
 注意:
 
 - 単価はリージョンや推論プロファイル (グローバル / リージョン) で変わることがあります。使っているものの単価を入れてください
-- Langfuse の料金は、利用者別・会話別の内訳を見るための推定値です。画面の利用料金と利用上限はプロキシの台帳 (Terraform の `model_prices` の単価) で計算し、請求額は AWS の Cost Explorer が正です。
-  両方の単価を同じにしておくと、数字がそろいます
+- 利用料金と利用上限の正はプロキシの台帳 (Terraform の `model_prices` の単価)、請求額の正は AWS の Cost Explorer です。
+  Langfuse の料金は、プロキシ経由なら台帳と同じ単価の値、開発モードならモデル定義から出した推定値です
 - 利用者 ID には ID トークンの `sub` を常に送ります (メールなどではない不透明な ID)
 
 ### 画面に利用料金を出す
@@ -646,15 +675,17 @@ Langfuse のシークレットキーはプロジェクトのデータを読み�
 
 ```
 アプリ ─(OTLP/HTTP + Authorization: Bearer <ID トークン>)→ Collector ─(Langfuse のキー)→ Langfuse
+LLM プロキシ ─(OTLP/HTTP JSON + 同じ利用者の ID トークン)→ Collector
 ```
 
 - アプリ: `OTEL_EXPORTER_OTLP_ENDPOINT=https://<Collector>` と `TELEMETRY_AUTH=id_token` を設定します (どちらも配布物に埋め込めます)。
   送るたびに、その時点の ID トークン (自動更新されたもの) を付けます。ログイン前のトレースは送りません
 - Collector: `infra/otel-collector.yaml` が設定のリファレンスです (otelcol-contrib。管理の分担は下記)。`oidc` 認証拡張で、ID トークンの署名・issuer・audience・期限を確かめます。
   利用者 ID (`langfuse.user.id`) は、アプリが送った値ではなく検証済みトークンの `sub` で上書きするので、他人の名前で料金を付けることはできません
+- LLM プロキシ: Terraform の `proxy_otlp_traces_endpoint` に `https://<Collector>/v1/traces` を入れます。Lambda は VPC の外にあるので、Ingress で公開している受け口を使います
 - Langfuse のキーは Collector にだけ渡します (Secrets Manager から External Secrets などで)
 - ID トークンが流れるので、Collector は TLS で受けてください。リリースビルドは `TELEMETRY_AUTH=id_token` のとき https 以外の送信先を拒否します
-- `pnpm dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます
+- `pnpm dev:mock` は、この形 (模擬の Collector に ID トークン付きで送る) で動きます。模擬のプロキシも、本物と同じく `traceparent` を親にした generation を模擬の Collector に送ります
 
 #### Collector の管理の分担
 

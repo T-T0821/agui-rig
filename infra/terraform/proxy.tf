@@ -73,6 +73,9 @@ resource "aws_lambda_function" "proxy" {
       MODEL_PRICES        = jsonencode(var.model_prices)
       MAX_OUTPUT_TOKENS   = tostring(var.max_output_tokens)
       CODE_INTERPRETER_ID = var.code_interpreter_id
+      # モデル呼び出しを Langfuse に送る (アプリから届いた ID トークンで Collector に認証する。新しい秘密は要らない)
+      OTLP_TRACES_ENDPOINT = var.proxy_otlp_traces_endpoint
+      PROXY_TRACE_CONTENT  = tostring(var.proxy_trace_content)
     })
   }
 

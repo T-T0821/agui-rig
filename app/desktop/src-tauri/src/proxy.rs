@@ -5,12 +5,22 @@
 //! アプリは AWS の認証情報を持たない。呼べるモデル・出力の上限・利用上限・料金の記録はプロキシ側で決まる。
 //!
 //! ID トークンは 1 時間ごとに更新されるので、モデルはトークンが変わったときだけ作り直す (HTTP の接続は Rig の共有クライアントで使い回す)。
+//!
+//! プロキシへの要求には、その時点のスパン (モデル呼び出し 1 回分) の W3C `traceparent` を付ける。
+//! プロキシはそれを親にして Langfuse の generation (トークン数・料金) を Collector に送るので、
+//! Langfuse ではアプリのトレースの中にプロキシのモデル呼び出しが並ぶ。トレースを送っていないときは付かない。
 
 use std::sync::{Arc, Mutex};
 
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry_http::HeaderInjector;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use rig_core::DynModel;
+use rig_core::http_client::{Exchange, HeaderMap, HttpMiddleware};
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAIConfig;
+use rig_core::wasm_compat::WasmBoxedFuture;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::auth::IdToken;
 
@@ -27,6 +37,11 @@ impl ModelSource {
             Self::Fixed(model) => model.clone(),
             Self::Proxy(proxy) => proxy.model(),
         }
+    }
+
+    /// トークン数と料金をプロキシがトレースに載せるか (アプリ側のスパンには載せない)。
+    pub fn usage_traced_by_proxy(&self) -> bool {
+        matches!(self, Self::Proxy(_))
     }
 }
 
@@ -55,13 +70,29 @@ impl LlmProxy {
         let model: Arc<DynModel<Completion>> = Arc::new(
             OpenAIConfig::new(token.clone())
                 .with_base_url(self.base_url.clone())
-                .client()
+                .connect(rig_reqwest::shared().with_middleware(TraceParent))
                 .chat(self.model_id.clone())
                 .into(),
         );
         *cached = Some((token, model.clone()));
         model
     }
+}
+
+/// 要求ヘッダーに、今のスパンの `traceparent` を付ける。
+/// Rig は要求をモデル呼び出しのスパンの中で送るので、そのスパンが親になる。
+struct TraceParent;
+
+impl HttpMiddleware for TraceParent {
+    fn before_request_headers<'a>(&'a self, _exchange: Exchange<'a>, headers: &'a mut HeaderMap) -> WasmBoxedFuture<'a, rig_core::http_client::Result<()>> {
+        inject_traceparent(headers);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn inject_traceparent(headers: &mut HeaderMap) {
+    let cx = tracing::Span::current().context();
+    TraceContextPropagator::new().inject_context(&cx, &mut HeaderInjector(headers));
 }
 
 /// プロキシの base_url (Rig はこの後ろに `/chat/completions` を付ける)。

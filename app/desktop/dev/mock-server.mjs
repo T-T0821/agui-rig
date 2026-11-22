@@ -38,6 +38,13 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
   let mockCostUsd = 0;
   /** E2E テストなどから変える利用上限 (PUT /__mock/config)。null なら MOCK_MONTHLY_LIMIT_USD を使う */
   let limitOverride = null;
+  /**
+   * トレースの記録 (GET /__mock/traces で E2E テストが読む)。
+   * - proxyCalls: プロキシの模擬が受けた traceparent
+   * - generations: プロキシの模擬が Collector に送った generation (本物のプロキシと同じく OTLP/HTTP JSON)
+   * - appExports: アプリが Collector に送った OTLP (protobuf) の中身の要点
+   */
+  const traces = { proxyCalls: [], generations: [], appExports: [] };
   /** 今月の模擬の利用料金と、上限の状態 (/usage と、プロキシの上限チェックで共通) */
   const usageNow = () => {
     const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
@@ -65,6 +72,9 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
       if ("monthlyLimitUsd" in b) limitOverride = b.monthlyLimitUsd;
       log("設定を変更:", JSON.stringify(b));
       return json({ monthlyLimitUsd: limitOverride });
+    }
+    if (url.pathname === "/__mock/traces" && req.method === "GET") {
+      return json(traces);
     }
 
     // ---- Auth0 (OIDC) ----
@@ -143,7 +153,7 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
           return send(200, u);
         }
         case "POST /v1/chat/completions":
-          return chatCompletions(JSON.parse(text || "{}"), res, send, sub);
+          return chatCompletions(JSON.parse(text || "{}"), res, send, sub, req.headers);
         case "POST /v1/code-interpreter/invoke": {
           // 本物はプロキシが AgentCore を呼ぶ。模擬はコードを実行せず、受け取ったものの要約を返す
           const b = JSON.parse(text || "{}");
@@ -172,6 +182,27 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
         claims = null;
       }
       const ok = claims?.iss === base && claims?.aud === "chat-app" && claims.exp > Date.now() / 1000;
+      if (ok && (req.headers["content-type"] ?? "").startsWith("application/json")) {
+        // LLM プロキシから (JSON)。generation のスパンを取り出して記録する
+        for (const rs of JSON.parse(text).resourceSpans ?? [])
+          for (const ss of rs.scopeSpans ?? [])
+            for (const sp of ss.spans ?? []) {
+              const attrs = Object.fromEntries((sp.attributes ?? []).map((a) => [a.key, Object.values(a.value)[0]]));
+              traces.generations.push({ traceId: sp.traceId, parentSpanId: sp.parentSpanId, sub: claims.sub, attrs });
+              log("Collector: プロキシの generation を受信", sp.name, `(利用者 ${claims.sub}、親 ${sp.parentSpanId ?? "なし"})`);
+            }
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end("{}");
+      }
+      if (ok) {
+        // アプリから (protobuf)。属性のキーは UTF-8 の文字列のまま入るので、バイト列を探して要点だけ記録する
+        traces.appExports.push({
+          bytes: raw.length,
+          hasUsage: raw.includes("gen_ai.usage."),
+          usageTracedByProxy: raw.includes("agui.usage_traced_by"),
+          traceIds: traces.proxyCalls.map((c) => c.traceId).filter((t) => t && raw.includes(Buffer.from(t, "hex"))),
+        });
+      }
       log("Collector: トレースを受信", `${raw.length} バイト`, ok ? `(利用者 ${claims.sub})` : "(認証エラー)");
       res.writeHead(ok ? 200 : 401, { "content-type": "application/x-protobuf" });
       return res.end();
@@ -186,7 +217,8 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
    * 決まった筋書き: (1) MCP の時刻ツール → (2) Code Interpreter → (3) 回答。
    * 本物と同じく、許可されたモデルだけ受け付け、上限に達していれば 429 を返す。
    */
-  async function chatCompletions(b, res, send, sub) {
+  async function chatCompletions(b, res, send, sub, headers) {
+    const started = Date.now();
     const model = b.model ?? "";
     if (model !== "global.anthropic.claude-sonnet-5-5") {
       log("LLM プロキシ: 許可されていないモデル", model);
@@ -251,8 +283,48 @@ export function startMockServer({ port = Number(process.env.MOCK_PORT ?? 9100), 
     const usageChunk = { prompt_tokens: 120, completion_tokens: 40, total_tokens: 160, prompt_tokens_details: { cached_tokens: 0 } };
     res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage: usageChunk })}\n\n`);
     res.write("data: [DONE]\n\n");
-    mockCostUsd += 120 * 2e-6 + 40 * 10e-6;
-    return res.end();
+    const cost = 120 * 2e-6 + 40 * 10e-6;
+    mockCostUsd += cost;
+    res.end();
+    await sendGeneration(headers, { model, sub, started, cost, input: messages });
+  }
+
+  /**
+   * 本物のプロキシ (app/backend/src/trace.ts) と同じく、モデル呼び出しを Langfuse の generation として
+   * Collector に送る (アプリから届いた ID トークンで認証、traceparent を親にする)。送り先はこの模擬サーバーの /v1/traces
+   */
+  async function sendGeneration(headers, { model, sub, started, cost, input }) {
+    const m = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(headers.traceparent ?? "");
+    traces.proxyCalls.push({ traceparent: headers.traceparent ?? null, traceId: m?.[1] ?? null });
+    const attr = (key, v) => ({ key, value: typeof v === "number" ? { intValue: String(v) } : { stringValue: String(v) } });
+    const ns = (ms) => `${BigInt(ms) * 1_000_000n}`;
+    const span = {
+      traceId: m?.[1] ?? Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex"),
+      spanId: Buffer.from(crypto.getRandomValues(new Uint8Array(8))).toString("hex"),
+      ...(m ? { parentSpanId: m[2] } : {}),
+      name: `chat ${model}`,
+      kind: 3,
+      startTimeUnixNano: ns(started),
+      endTimeUnixNano: ns(Date.now()),
+      attributes: [
+        attr("langfuse.observation.type", "generation"),
+        attr("langfuse.observation.model.name", model),
+        attr("langfuse.user.id", sub),
+        attr("langfuse.observation.usage_details", JSON.stringify({ input: 120, output: 40, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })),
+        attr("langfuse.observation.cost_details", JSON.stringify({ total: cost })),
+        attr("langfuse.observation.input", JSON.stringify(input)),
+      ],
+      status: { code: 1 },
+    };
+    try {
+      await fetch(`${base}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: headers.authorization },
+        body: JSON.stringify({ resourceSpans: [{ resource: { attributes: [attr("service.name", "agui-llm-proxy")] }, scopeSpans: [{ scope: { name: "agui-llm-proxy" }, spans: [span] }] }] }),
+      });
+    } catch (e) {
+      log("LLM プロキシ: トレースを送れません", String(e));
+    }
   }
 
   return new Promise((resolve) => server.listen(port, "127.0.0.1", () => {

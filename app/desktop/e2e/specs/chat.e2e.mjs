@@ -1,4 +1,4 @@
-import { allByText, button, byText, relogin, screenshot, send, setMock } from "./helpers.mjs";
+import { allByText, button, byText, mockTraces, relogin, screenshot, send, setMock } from "./helpers.mjs";
 
 const ANSWER = "LLM プロキシの模擬応答です";
 
@@ -29,6 +29,29 @@ describe("模擬環境: ログイン → チャット (ツール) → 履歴 →
     // 回答の最後 (2 つ目のツールの結果) まで流れ切るのを待つ (ツールの表示と回答の 2 か所に出る)
     await browser.waitUntil(async () => (await allByText("実行はしていません")).length >= 2);
     await screenshot("chat-with-tools");
+  });
+
+  it("プロキシのモデル呼び出しが Langfuse の generation としてアプリのトレースにつながり、トークン数は二重に送らない", async () => {
+    // 筋書きはモデル呼び出し 3 回 (時刻ツール → Code Interpreter → 回答)
+    let t = await mockTraces();
+    expect(t.proxyCalls.length).toBe(3);
+    // アプリはプロキシへの要求ごとに traceparent を付け、どれも同じトレース (チャット 1 回) に入る
+    for (const c of t.proxyCalls) expect(c.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    expect(new Set(t.proxyCalls.map((c) => c.traceId)).size).toBe(1);
+    // プロキシの generation は、そのトレースの子として Collector に届く (利用者は ID トークンの sub)
+    await browser.waitUntil(async () => (await mockTraces()).generations.length === 3, { timeout: 10_000 });
+    t = await mockTraces();
+    for (const g of t.generations) {
+      expect(g.traceId).toBe(t.proxyCalls[0].traceId);
+      expect(g.parentSpanId).toMatch(/^[0-9a-f]{16}$/);
+      expect(g.sub).toBe("mock-user-001");
+      expect(g.attrs["langfuse.observation.type"]).toBe("generation");
+    }
+    // アプリのスパン (バッチで数秒後に届く) は同じトレースで、トークン数は外してある
+    await browser.waitUntil(async () => (await mockTraces()).appExports.some((e) => e.traceIds.length > 0), { timeout: 20_000 });
+    const app = (await mockTraces()).appExports.filter((e) => e.traceIds.length > 0);
+    expect(app.some((e) => e.usageTracedByProxy)).toBe(true);
+    expect(app.every((e) => !e.hasUsage)).toBe(true);
   });
 
   it("会話が履歴に保存され、新しい会話から戻って開き直せる", async () => {
