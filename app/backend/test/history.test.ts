@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handler, parseSaveBody } from "../src/history.ts";
-import { userNameOf } from "../src/http.ts";
+import { subOf, userNameOf } from "../src/http.ts";
 import { evaluate, periodStartOf, periodStarts, resolveLimit } from "../src/usage.ts";
 
 test("PUT の本文を確かめる", () => {
@@ -19,6 +19,15 @@ test("sub が無ければ 401、ID が不正なら 400", async () => {
   assert.equal((await handler(base as never)).statusCode, 401);
   const withSub = { ...base, requestContext: { authorizer: { jwt: { claims: { sub: "auth0|1" } } } }, pathParameters: { id: "../x" } };
   assert.equal((await handler(withSub as never)).statusCode, 400);
+});
+
+test("ID トークンだけを認める (Cognito のアクセストークンは token_use で弾く)", () => {
+  const ev = (claims: Record<string, unknown>) => ({ requestContext: { authorizer: { jwt: { claims } } } }) as never;
+  assert.equal(subOf(ev({ sub: "auth0|1" })), "auth0|1");
+  assert.equal(subOf(ev({ sub: "u-1", token_use: "id" })), "u-1");
+  assert.equal(subOf(ev({ sub: "u-1", token_use: "access", client_id: "c" })), undefined);
+  assert.equal(subOf(ev({ sub: "" })), undefined);
+  assert.equal(subOf({ requestContext: {} } as never), undefined);
 });
 
 test("今日と今月の始まり (JST)", () => {

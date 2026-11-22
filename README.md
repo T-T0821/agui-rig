@@ -166,6 +166,9 @@ flowchart LR
 - 履歴を API Gateway 経由にしているのは、JWT オーソライザーが ID トークンを検証して `sub` を Lambda に渡すので、利用者を偽れないためです
   (アプリが一時認証情報で DynamoDB を直接読み書きすると、ほかの人の項目に届かないようにするのが難しい)。
   このため、アプリのロールに DynamoDB の権限は要りません。
+- API は ID トークンだけを受け付けます (STS・Collector と同じトークン)。JWT オーソライザーが署名 (issuer の JWKS)・`iss`・`aud` (Client ID)・期限を確かめ、
+  オーソライザーが見ない Cognito 独自の `token_use` は Lambda が確かめて、`id` 以外 (Cognito のアクセストークン) は 401 にします。
+  Auth0 のアクセストークンは `aud` が API の Identifier なので、オーソライザーの時点で弾かれます。
 - トレースも同じ考え方で、Collector がアプリの ID トークンを検証します。Langfuse のキーは Collector と利用料金の Lambda だけが持ち、PC には置きません。
 
 ## Auth0 の設定
@@ -232,7 +235,7 @@ AWS のリソースは `infra/terraform/` の Terraform で作ります。作る
 | IAM の OIDC プロバイダー | Auth0 の issuer を登録 (audience = Client ID)。既にあれば `create_oidc_provider = false` |
 | IAM ロール (アプリ用) | 信頼: Auth0 の ID トークンだけ (`<テナント>.auth0.com/:aud` = Client ID)。権限: Bedrock の呼び出しと AgentCore Code Interpreter だけ。DynamoDB の権限は持たない |
 | DynamoDB テーブル | チャット履歴 (`pk` = 利用者の `sub`、`sk` = 会話 ID) |
-| API Gateway (HTTP API) | JWT オーソライザー (Auth0 の ID トークンの署名・`iss`・`aud`・期限を検証)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
+| API Gateway (HTTP API) | JWT オーソライザー (ID トークンの署名・`iss`・`aud`・期限を検証。Cognito の `token_use` は Lambda が確認)。`GET /threads`、`GET`/`PUT`/`DELETE /threads/{id}`、`GET /usage`。スロットリング付き |
 | チャット履歴の Lambda | `app/backend/src/history.ts`。DynamoDB の読み書きだけの権限 |
 | 利用料金の Lambda (任意) | `app/backend/src/usage.ts`。`langfuse_secret_arn` を指定したときだけ作る (作らなければ `/usage` は 404 で、画面にも出ない) |
 | 利用上限の DynamoDB テーブル (任意) | 利用料金と一緒に作る。`pk` = 利用者の `sub`。上限と手動リセットの時刻は管理者だけが書き、利用者名と最新の料金は Lambda が書く |
