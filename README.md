@@ -94,7 +94,7 @@ PC には AWS の認証情報も Langfuse のキーも置きません。画面 (
 
 ![agui-rig の AWS 構成図 (本番運用相当)](docs/images/aws-architecture.png)
 
-図の元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。
+図の元データは [docs/images/aws-architecture.drawio](docs/images/aws-architecture.drawio) です (draw.io で開いて直せます)。PNG はアイコンを簡略化して書き出したものなので、AWS の公式アイコンで見るときは draw.io で開いてください。
 
 本番運用相当にしている点:
 
