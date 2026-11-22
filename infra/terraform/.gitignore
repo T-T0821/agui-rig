@@ -4,3 +4,5 @@
 *.tfstate.*
 terraform.tfvars
 crash.log
+dev_env_backend_override.tf
+.terraform-dev/
